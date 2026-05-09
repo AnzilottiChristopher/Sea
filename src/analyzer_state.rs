@@ -5,6 +5,7 @@ use std::collections::HashMap;
 pub enum OwnershipState {
     Allocated,
     Freed,
+    Uninitialized,
 }
 
 pub struct AnalyzerState {
