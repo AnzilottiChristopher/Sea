@@ -70,7 +70,84 @@ fn check_node(node: Node, source: &str, file: &str, state: &mut AnalyzerState) {
         "return_statement" => {
             handle_return(node, source, file, state);
         }
+        "field_expression" => {
+            handle_field_expression(node, source, file, state);
+        }
+        "declaration" => {
+            handle_declaration(node, source, state);
+        }
         _ => {}
+    }
+}
+
+fn handle_declaration(node: Node, source: &str, state: &mut AnalyzerState) {
+    if let Some(decl) = node.child_by_field_name("declarator") {
+        match decl.kind() {
+            "init_declarator" => {
+                if let Some(value) = decl.child_by_field_name("value") {
+                    let value_text = &source[value.start_byte()..value.end_byte()];
+
+                    if value_text == "NULL" {
+                        if let Some(var_name) = get_identifier(decl, source) {
+                            state.ownership.insert(var_name, OwnershipState::Null);
+                        }
+                    }
+                }
+            }
+            "pointer_declarator" => {
+                if let Some(var_name) = get_identifier(decl, source) {
+                    state
+                        .ownership
+                        .insert(var_name, OwnershipState::Uninitialized);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn handle_field_expression(node: Node, source: &str, file: &str, state: &mut AnalyzerState) {
+    if let Some(argument) = node.child_by_field_name("argument") {
+        let op = node
+            .child_by_field_name("operator")
+            .map(|op| &source[op.start_byte()..op.end_byte()]);
+
+        if op == Some("->") {
+            let var_name = &source[argument.start_byte()..argument.end_byte()];
+            let line = node.start_position().row + 1;
+            let col = node.start_position().column;
+
+            match state.ownership.get(var_name) {
+                Some(OwnershipState::Freed) => {
+                    state.report(
+                        file,
+                        line,
+                        col,
+                        &format!("use of field of freed pointer '{}'", var_name),
+                        Severity::Error,
+                    );
+                }
+                Some(OwnershipState::Null) => {
+                    state.report(
+                        file,
+                        line,
+                        col,
+                        &format!("null pointer dereference via field access '{}'", var_name),
+                        Severity::Error,
+                    );
+                }
+                Some(OwnershipState::Uninitialized) => {
+                    state.report(
+                        file,
+                        line,
+                        col,
+                        &format!("field access on uninitialized pointer '{}'", var_name),
+                        Severity::Error,
+                    );
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -101,6 +178,27 @@ fn check_return_expr(
                         col,
                         &format!("returning freed pointer '{}' from function", var_name),
                         Severity::Error,
+                    );
+                }
+                Some(OwnershipState::Uninitialized) => {
+                    state.report(
+                        file,
+                        line,
+                        col,
+                        &format!(
+                            "returning uninitialized pointer '{}' from function",
+                            var_name
+                        ),
+                        Severity::Warning,
+                    );
+                }
+                Some(OwnershipState::Null) => {
+                    state.report(
+                        file,
+                        line,
+                        col,
+                        &format!("returning null pointer '{}' from function", var_name),
+                        Severity::Warning, // warning not error — sometimes intentional
                     );
                 }
                 _ => {}
@@ -137,6 +235,27 @@ fn handle_pass_freed_pointer(node: Node, source: &str, file: &str, state: &mut A
                                 col,
                                 &format!("passing freed pointer '{}' to function", var_name),
                                 Severity::Error,
+                            );
+                        }
+                        Some(OwnershipState::Uninitialized) => {
+                            state.report(
+                                file,
+                                line,
+                                col,
+                                &format!(
+                                    "passing uninitialized pointer '{}' to function",
+                                    var_name
+                                ),
+                                Severity::Warning,
+                            );
+                        }
+                        Some(OwnershipState::Null) => {
+                            state.report(
+                                file,
+                                line,
+                                col,
+                                &format!("passing null pointer '{}' to function", var_name),
+                                Severity::Warning,
                             );
                         }
                         _ => {}
@@ -178,6 +297,15 @@ fn handle_dereference(node: Node, source: &str, file: &str, state: &mut Analyzer
                 line,
                 col,
                 &format!("use of uninitialized pointer '{}'", var_name),
+                Severity::Error,
+            );
+        }
+        Some(OwnershipState::Null) => {
+            state.report(
+                file,
+                line,
+                col,
+                &format!("null pointer dereference of '{}'", var_name),
                 Severity::Error,
             );
         }
@@ -254,6 +382,15 @@ fn handle_free(node: Node, source: &str, file: &str, state: &mut AnalyzerState) 
                         col,
                         &format!("free of uninitialized variable: '{}'", var_name),
                         Severity::Error,
+                    );
+                }
+                Some(OwnershipState::Null) => {
+                    state.report(
+                        file,
+                        line,
+                        col,
+                        &format!("free of 'NULL' pointer '{}'", var_name),
+                        Severity::Warning,
                     );
                 }
                 None => {

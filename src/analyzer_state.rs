@@ -6,6 +6,7 @@ pub enum OwnershipState {
     Allocated,
     Freed,
     Uninitialized,
+    Null,
 }
 
 pub struct AnalyzerState {
