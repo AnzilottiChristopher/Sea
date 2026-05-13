@@ -5,6 +5,7 @@ use tree_sitter::{Node, Tree};
 use crate::{
     analyzer_state::{AnalyzerState, OwnershipState},
     diagnostics::{Diagnostic, Severity},
+    variable_info::{AllocKind, VariableInfo},
 };
 
 pub struct Sea {
@@ -89,18 +90,48 @@ fn handle_declaration(node: Node, source: &str, state: &mut AnalyzerState) {
 
                     if value_text == "NULL" {
                         if let Some(var_name) = get_identifier(decl, source) {
-                            state.ownership.insert(var_name, OwnershipState::Null);
+                            state
+                                .ownership
+                                .insert(var_name, VariableInfo::null(state.scope_depth));
+                        }
+                    } else if let Some(inner) = decl.child_by_field_name("declarator") {
+                        match inner.kind() {
+                            "identifier" => {
+                                let var_name =
+                                    source[inner.start_byte()..inner.end_byte()].to_string();
+                                state
+                                    .ownership
+                                    .insert(var_name, VariableInfo::stack(state.scope_depth));
+                            }
+                            "pointer_declarator" => {
+                                if value.kind() != "call_expression" {
+                                    if let Some(var_name) = get_identifier(inner, source) {
+                                        state.ownership.insert(
+                                            var_name,
+                                            VariableInfo::stack(state.scope_depth),
+                                        );
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
-            "pointer_declarator" => {
-                if let Some(var_name) = get_identifier(decl, source) {
-                    state
-                        .ownership
-                        .insert(var_name, OwnershipState::Uninitialized);
-                }
-            }
+            // "pointer_declarator" => {
+            //     if let Some(var_name) = get_identifier(decl, source) {
+            //         state
+            //             .ownership
+            //             .insert(var_name, VariableInfo::stack(state.scope_depth));
+            //     }
+            // }
+            // "identifier" => {
+            //     if let Some(var_name) = get_identifier(decl, source) {
+            //         state
+            //             .ownership
+            //             .insert(var_name, VariableInfo::stack(state.scope_depth));
+            //     }
+            // }
             _ => {}
         }
     }
@@ -117,7 +148,7 @@ fn handle_field_expression(node: Node, source: &str, file: &str, state: &mut Ana
             let line = node.start_position().row + 1;
             let col = node.start_position().column;
 
-            match state.ownership.get(var_name) {
+            match state.ownership.get(var_name).map(|v| &v.state) {
                 Some(OwnershipState::Freed) => {
                     state.report(
                         file,
@@ -153,68 +184,68 @@ fn handle_field_expression(node: Node, source: &str, file: &str, state: &mut Ana
 
 fn handle_return(node: Node, source: &str, file: &str, state: &mut AnalyzerState) {
     if let Some(expr) = node.named_child(0) {
-        check_return_expr(expr, source, file, node, state);
+        match expr.kind() {
+            "identifier" => {
+                let var_name = &source[expr.start_byte()..expr.end_byte()];
+                let line = node.start_position().row + 1;
+                let col = node.start_position().column;
+
+                match state.ownership.get(var_name).map(|v| &v.state) {
+                    Some(OwnershipState::Freed) => {
+                        state.report(
+                            file,
+                            line,
+                            col,
+                            &format!("returning freed pointer '{}' from function", var_name),
+                            Severity::Error,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            "pointer_expression" => {
+                handle_return_address_of(expr, source, file, node, state);
+            }
+            _ => {}
+        }
     }
 }
 
-fn check_return_expr(
-    node: Node,
+fn handle_return_address_of(
+    expr: Node,
     source: &str,
     file: &str,
     return_node: Node,
     state: &mut AnalyzerState,
 ) {
-    match node.kind() {
-        "identifier" => {
-            let var_name = &source[node.start_byte()..node.end_byte()];
-            let line = return_node.start_position().row + 1;
-            let col = return_node.start_position().column;
+    if let Some(operator) = expr.child(0) {
+        let op = &source[operator.start_byte()..operator.end_byte()];
+        if op != "&" {
+            return;
+        }
+    }
 
-            match state.ownership.get(var_name) {
-                Some(OwnershipState::Freed) => {
-                    state.report(
-                        file,
-                        line,
-                        col,
-                        &format!("returning freed pointer '{}' from function", var_name),
-                        Severity::Error,
-                    );
-                }
-                Some(OwnershipState::Uninitialized) => {
-                    state.report(
-                        file,
-                        line,
-                        col,
-                        &format!(
-                            "returning uninitialized pointer '{}' from function",
-                            var_name
-                        ),
-                        Severity::Warning,
-                    );
-                }
-                Some(OwnershipState::Null) => {
-                    state.report(
-                        file,
-                        line,
-                        col,
-                        &format!("returning null pointer '{}' from function", var_name),
-                        Severity::Warning, // warning not error — sometimes intentional
-                    );
-                }
-                _ => {}
-            }
+    let var_name = match get_identifier(expr, source) {
+        Some(name) => name,
+        None => return,
+    };
+
+    let line = return_node.start_position().row + 1;
+    let col = return_node.start_position().column;
+
+    match state.ownership.get(var_name.as_str()) {
+        Some(info) if info.alloc_kind == AllocKind::Stack => {
+            state.report(
+                file,
+                line,
+                col,
+                &format!(
+                    "returning address of stack variable '{}' which will be invalid after function returns",
+                    var_name
+                ),
+                Severity::Error,
+            );
         }
-        "conditional_expression" => {
-            // return p ? x : y
-            // check all three branches — condition, true, false
-            for i in 0..node.named_child_count() {
-                if let Some(child) = node.named_child(i as u32) {
-                    check_return_expr(child, source, file, return_node, state);
-                }
-            }
-        }
-        // pointer_expression and call_expression are
-        // handled by their own handlers already
         _ => {}
     }
 }
@@ -227,7 +258,7 @@ fn handle_pass_freed_pointer(node: Node, source: &str, file: &str, state: &mut A
         for i in 0..args.named_child_count() {
             if let Some(arg) = args.named_child(i as u32) {
                 if let Some(var_name) = get_identifier(arg, source) {
-                    match state.ownership.get(var_name.as_str()) {
+                    match state.ownership.get(var_name.as_str()).map(|v| &v.state) {
                         Some(OwnershipState::Freed) => {
                             state.report(
                                 file,
@@ -267,6 +298,13 @@ fn handle_pass_freed_pointer(node: Node, source: &str, file: &str, state: &mut A
 }
 
 fn handle_dereference(node: Node, source: &str, file: &str, state: &mut AnalyzerState) {
+    if let Some(operator) = node.child(0) {
+        let op = &source[operator.start_byte()..operator.end_byte()];
+        if op != "*" {
+            return;
+        }
+    }
+
     let var_name = match node.named_child(0) {
         Some(child) => &source[child.start_byte()..child.end_byte()],
         None => return,
@@ -275,7 +313,7 @@ fn handle_dereference(node: Node, source: &str, file: &str, state: &mut Analyzer
     let line = node.start_position().row + 1;
     let col = node.start_position().column;
 
-    match state.ownership.get(var_name) {
+    match state.ownership.get(var_name).map(|v| &v.state) {
         Some(OwnershipState::Freed) => {
             state.report(
                 file,
@@ -308,6 +346,9 @@ fn handle_dereference(node: Node, source: &str, file: &str, state: &mut Analyzer
                 &format!("null pointer dereference of '{}'", var_name),
                 Severity::Error,
             );
+        }
+        Some(OwnershipState::OutOfScope) => {
+            //TODO Check if this state matters
         }
         None => {
             // variable is not in hashmap
@@ -343,12 +384,21 @@ fn handle_malloc(node: Node, source: &str, state: &mut AnalyzerState) {
         _ => return,
     };
 
-    match state.ownership.get(var_name.as_str()) {
+    match state.ownership.get(var_name.as_str()).map(|v| &v.state) {
         Some(OwnershipState::Freed) => {
-            state.ownership.insert(var_name, OwnershipState::Allocated);
+            if let Some(info) = state.ownership.get_mut(var_name.as_str()) {
+                info.state = OwnershipState::Allocated;
+            }
         }
-        _ => {
-            state.ownership.insert(var_name, OwnershipState::Allocated);
+        Some(_) => {
+            if let Some(info) = state.ownership.get_mut(var_name.as_str()) {
+                info.state = OwnershipState::Allocated;
+            }
+        }
+        None => {
+            state
+                .ownership
+                .insert(var_name, VariableInfo::heap(state.scope_depth));
         }
     }
 }
@@ -360,7 +410,7 @@ fn handle_free(node: Node, source: &str, file: &str, state: &mut AnalyzerState) 
             let line = node.start_position().row + 1;
             let col = node.start_position().column;
 
-            match state.ownership.get(var_name) {
+            match state.ownership.get(var_name).map(|v| &v.state) {
                 Some(OwnershipState::Freed) => {
                     state.report(
                         file,
@@ -371,9 +421,9 @@ fn handle_free(node: Node, source: &str, file: &str, state: &mut AnalyzerState) 
                     );
                 }
                 Some(OwnershipState::Allocated) => {
-                    state
-                        .ownership
-                        .insert(var_name.to_string(), OwnershipState::Freed);
+                    if let Some(info) = state.ownership.get_mut(var_name) {
+                        info.state = OwnershipState::Freed;
+                    }
                 }
                 Some(OwnershipState::Uninitialized) => {
                     state.report(
@@ -392,6 +442,9 @@ fn handle_free(node: Node, source: &str, file: &str, state: &mut AnalyzerState) 
                         &format!("free of 'NULL' pointer '{}'", var_name),
                         Severity::Warning,
                     );
+                }
+                Some(OwnershipState::OutOfScope) => {
+                    //TODO Check if this one matters
                 }
                 None => {
                     state.report(
