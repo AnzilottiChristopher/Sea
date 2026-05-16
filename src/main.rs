@@ -1,6 +1,7 @@
 mod analyzer_state;
 mod diagnostics;
 mod sea;
+mod tests;
 mod variable_info;
 
 use clap::Parser;

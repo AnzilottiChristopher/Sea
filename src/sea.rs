@@ -41,12 +41,22 @@ impl Sea {
 }
 
 fn walk(node: Node, source: &str, file: &str, state: &mut AnalyzerState) {
+    if node.kind() == "compound_statement" {
+        state.enter_scope();
+    }
+
     check_node(node, source, file, state);
 
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i as u32) {
             walk(child, source, file, state);
         }
+    }
+
+    if node.kind() == "compound_statement" {
+        let line = node.end_position().row + 1;
+        let col = node.end_position().column;
+        state.exit_scope(file, line, col);
     }
 }
 
@@ -77,7 +87,42 @@ fn check_node(node: Node, source: &str, file: &str, state: &mut AnalyzerState) {
         "declaration" => {
             handle_declaration(node, source, state);
         }
+        "assignment_expression" => {
+            handle_assignment(node, source, state);
+        }
         _ => {}
+    }
+}
+
+fn handle_assignment(node: Node, source: &str, state: &mut AnalyzerState) {
+    let left = match node.child_by_field_name("left") {
+        Some(l) => l,
+        None => return,
+    };
+    let right = match node.child_by_field_name("right") {
+        Some(r) => r,
+        None => return,
+    };
+
+    if right.kind() != "pointer_expression" {
+        return;
+    }
+
+    if let Some(op) = right.child(0) {
+        let op_text = &source[op.start_byte()..op.end_byte()];
+        if op_text != "&" {
+            return;
+        }
+    }
+
+    let ptr_name = source[left.start_byte()..left.end_byte()].to_string();
+    let target_name = match get_identifier(right, source) {
+        Some(name) => name,
+        None => return,
+    };
+
+    if let Some(info) = state.ownership.get_mut(ptr_name.as_str()) {
+        info.points_to = Some(target_name);
     }
 }
 
@@ -104,12 +149,36 @@ fn handle_declaration(node: Node, source: &str, state: &mut AnalyzerState) {
                                     .insert(var_name, VariableInfo::stack(state.scope_depth));
                             }
                             "pointer_declarator" => {
-                                if value.kind() != "call_expression" {
-                                    if let Some(var_name) = get_identifier(inner, source) {
-                                        state.ownership.insert(
-                                            var_name,
-                                            VariableInfo::stack(state.scope_depth),
-                                        );
+                                if let Some(var_name) = get_identifier(inner, source) {
+                                    match value.kind() {
+                                        "call_expression" => {
+                                            if let Some(func) =
+                                                value.child_by_field_name("function")
+                                            {
+                                                let func_name =
+                                                    &source[func.start_byte()..func.end_byte()];
+                                                if func_name != "malloc" {
+                                                    state.ownership.insert(
+                                                        var_name,
+                                                        VariableInfo::heap(state.scope_depth),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        "pointer_expression" => {
+                                            let mut info = VariableInfo::stack(state.scope_depth);
+                                            info.state = OwnershipState::Allocated;
+                                            if let Some(target) = get_identifier(value, source) {
+                                                info.points_to = Some(target);
+                                            }
+                                            state.ownership.insert(var_name, info);
+                                        }
+                                        _ => {
+                                            state.ownership.insert(
+                                                var_name,
+                                                VariableInfo::stack(state.scope_depth),
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -118,20 +187,20 @@ fn handle_declaration(node: Node, source: &str, state: &mut AnalyzerState) {
                     }
                 }
             }
-            // "pointer_declarator" => {
-            //     if let Some(var_name) = get_identifier(decl, source) {
-            //         state
-            //             .ownership
-            //             .insert(var_name, VariableInfo::stack(state.scope_depth));
-            //     }
-            // }
-            // "identifier" => {
-            //     if let Some(var_name) = get_identifier(decl, source) {
-            //         state
-            //             .ownership
-            //             .insert(var_name, VariableInfo::stack(state.scope_depth));
-            //     }
-            // }
+            "pointer_declarator" => {
+                if let Some(var_name) = get_identifier(decl, source) {
+                    state
+                        .ownership
+                        .insert(var_name, VariableInfo::stack(state.scope_depth));
+                }
+            }
+            "identifier" => {
+                if let Some(var_name) = get_identifier(decl, source) {
+                    state
+                        .ownership
+                        .insert(var_name, VariableInfo::stack(state.scope_depth));
+                }
+            }
             _ => {}
         }
     }
@@ -348,7 +417,7 @@ fn handle_dereference(node: Node, source: &str, file: &str, state: &mut Analyzer
             );
         }
         Some(OwnershipState::OutOfScope) => {
-            //TODO Check if this state matters
+            //Checked in exit_scope
         }
         None => {
             // variable is not in hashmap
