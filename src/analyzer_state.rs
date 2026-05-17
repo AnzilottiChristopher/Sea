@@ -11,6 +11,7 @@ pub enum OwnershipState {
     Uninitialized,
     Null,
     OutOfScope,
+    MaybeFreed,
 }
 
 pub struct AnalyzerState {
