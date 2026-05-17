@@ -1,4 +1,5 @@
 mod analyzer_state;
+mod cfg;
 mod diagnostics;
 mod sea;
 mod tests;

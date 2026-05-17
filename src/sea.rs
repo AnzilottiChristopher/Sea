@@ -90,6 +90,7 @@ fn check_node(node: Node, source: &str, file: &str, state: &mut AnalyzerState) {
         "assignment_expression" => {
             handle_assignment(node, source, state);
         }
+        "if_statement" => {}
         _ => {}
     }
 }
