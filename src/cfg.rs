@@ -1,7 +1,14 @@
-use crate::analyzer_state::OwnershipState;
+use crate::{
+    analyzer_state::OwnershipState, diagnostics::Diagnostic, diagnostics::Severity,
+    variable_info::VariableInfo,
+};
+use petgraph::graph::DiGraph;
 use std::collections::HashMap;
 use tree_sitter::Node;
 
+pub type Cfg = DiGraph<BasicBlock, ()>;
+
+#[derive(Debug)]
 pub enum Statement {
     Malloc {
         var: String,
@@ -27,10 +34,33 @@ pub enum Statement {
         var: String,
         row: usize,
         col: usize,
+        is_address_of: bool,
     },
     PassToFunction {
         var: String,
         func: String,
+        row: usize,
+        col: usize,
+    },
+    NullAssign {
+        var: String,
+        row: usize,
+        col: usize,
+    },
+    AddrAssign {
+        var: String,
+        points_to: String,
+        row: usize,
+        col: usize,
+    },
+    PointerAssign {
+        var: String,
+        points_to: String,
+        row: usize,
+        col: usize,
+    },
+    EnterScope,
+    ExitScope {
         row: usize,
         col: usize,
     },
@@ -43,34 +73,102 @@ pub struct BasicBlock {
 
 #[derive(Clone)]
 pub struct BlockState {
-    pub ownership: HashMap<String, OwnershipState>,
+    pub ownership: HashMap<String, VariableInfo>,
+    pub scope_depth: usize,
 }
 
 impl BlockState {
     pub fn new() -> Self {
         BlockState {
             ownership: HashMap::new(),
+            scope_depth: 0,
         }
     }
 
     pub fn merge(&self, other: &BlockState) -> BlockState {
         let mut merged = self.clone();
 
-        for (var, state) in &other.ownership {
-            match merged.ownership.get(var) {
-                Some(existing) if existing == state => {}
-                Some(_) => {
-                    merged
-                        .ownership
-                        .insert(var.clone(), OwnershipState::MaybeFreed);
-                }
-                None => {
-                    merged.ownership.insert(var.clone(), state.clone());
-                }
-            }
-        }
+        // for (var, state) in &other.ownership {
+        //     match merged.ownership.get(var) {
+        //         Some(existing) if existing == state => {}
+        //         Some(_) => {
+        //             merged
+        //                 .ownership
+        //                 .insert(var.clone(), OwnershipState::MaybeFreed);
+        //         }
+        //         None => {
+        //             merged.ownership.insert(var.clone(), state.clone());
+        //         }
+        //     }
+        // }
         merged
     }
+    pub fn enter_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+
+    pub fn exit_scope(
+        &mut self,
+        file: &str,
+        line: usize,
+        col: usize,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let dying: Vec<String> = self
+            .ownership
+            .iter()
+            .filter(|(_, info)| info.scope_depth == self.scope_depth)
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        let dangling: Vec<String> = self
+            .ownership
+            .iter()
+            .filter(|(_, info)| {
+                if let Some(ref target) = info.points_to {
+                    info.scope_depth < self.scope_depth && dying.contains(target)
+                } else {
+                    false
+                }
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        for ptr_name in &dangling {
+            if let Some(ptr_info) = self.ownership.get(ptr_name) {
+                if let Some(ref target) = ptr_info.points_to.clone() {
+                    diagnostics.push(Diagnostic {
+                        file: file.to_string(),
+                        line,
+                        col,
+                        message: format!(
+                            "pointer '{}' will outlive '{}' which it points to",
+                            ptr_name, target
+                        ),
+                        severity: Severity::Error,
+                    });
+                }
+            }
+            if let Some(info) = self.ownership.get_mut(ptr_name) {
+                info.state = OwnershipState::OutOfScope;
+            }
+        }
+
+        self.ownership
+            .retain(|_, info| info.scope_depth < self.scope_depth);
+        self.scope_depth -= 1;
+    }
+}
+
+pub fn build_cfg(node: Node, source: &str) -> Cfg {
+    let mut cfg = Cfg::new();
+    let block = build_linear_block(node, source);
+    println!("collected {} statements:", block.statements.len());
+    for stmt in &block.statements {
+        println!("  {:?}", stmt);
+    }
+    cfg.add_node(block);
+    cfg
 }
 
 pub fn build_linear_block(node: Node, source: &str) -> BasicBlock {
@@ -98,12 +196,143 @@ fn collect_statements(node: Node, source: &str, stmts: &mut Vec<Statement>) {
                 stmts.push(stmt);
             }
         }
-        "field_access" => {
+        "field_expression" => {
             if let Some(stmt) = try_extract_field_access(node, source) {
                 stmts.push(stmt);
             }
         }
-        _ => {}
+        "declaration" => {
+            if let Some(stmt) = try_extract_declaration(node, source) {
+                stmts.push(stmt);
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_statements(child, source, stmts);
+            }
+        }
+        "compound_statement" => {
+            stmts.push(Statement::EnterScope);
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_statements(child, source, stmts);
+            }
+            let row = node.end_position().row + 1;
+            let col = node.end_position().column;
+            stmts.push(Statement::ExitScope { row, col });
+        }
+        "assignment_expression" => {
+            if let Some(stmt) = try_extract_assignment(node, source) {
+                stmts.push(stmt);
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_statements(child, source, stmts);
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_statements(child, source, stmts);
+            }
+        }
+    }
+}
+
+fn try_extract_assignment(node: Node, source: &str) -> Option<Statement> {
+    let left = node.child_by_field_name("left")?;
+    let right = node.child_by_field_name("right")?;
+
+    if right.kind() != "pointer_expression" {
+        return None;
+    }
+
+    let operator = right.child(0)?;
+    let op = &source[operator.start_byte()..operator.end_byte()];
+    if op != "&" {
+        return None;
+    }
+
+    let (var, row, col) = get_source(left, source);
+    let target = right.named_child(0)?;
+    let (points_to, _, _) = get_source(target, source);
+    Some(Statement::PointerAssign {
+        var,
+        points_to,
+        row,
+        col,
+    })
+}
+
+fn try_extract_declaration(node: Node, source: &str) -> Option<Statement> {
+    let decl = node.child_by_field_name("declarator")?;
+
+    match decl.kind() {
+        "init_declarator" => {
+            let value = decl.child_by_field_name("value")?;
+            let inner = decl.child_by_field_name("declarator")?;
+            let value_text = &source[value.start_byte()..value.end_byte()];
+
+            // skip — try_extract_call handles malloc/calloc/realloc
+            if value.kind() == "call_expression" {
+                return None;
+            }
+
+            match inner.kind() {
+                "pointer_declarator" => {
+                    let var_node = inner.named_child(0).unwrap_or(inner);
+                    let (var, row, col) = get_source(var_node, source);
+                    if value_text == "NULL" {
+                        Some(Statement::NullAssign { var, row, col })
+                    } else if value.kind() == "pointer_expression" {
+                        let target = value.named_child(0)?;
+                        let (points_to, _, _) = get_source(target, source);
+                        Some(Statement::AddrAssign {
+                            var,
+                            points_to,
+                            row,
+                            col,
+                        })
+                    } else {
+                        Some(Statement::AddrAssign {
+                            var,
+                            points_to: String::new(),
+                            row,
+                            col,
+                        })
+                    }
+                }
+                "identifier" => {
+                    let (var, row, col) = get_source(inner, source);
+                    Some(Statement::AddrAssign {
+                        var,
+                        points_to: String::new(),
+                        row,
+                        col,
+                    })
+                }
+                _ => None,
+            }
+        }
+        "pointer_declarator" => {
+            let var_node = decl.named_child(0).unwrap_or(decl);
+            let (var, row, col) = get_source(var_node, source);
+            Some(Statement::AddrAssign {
+                var,
+                points_to: String::new(),
+                row,
+                col,
+            })
+        }
+        "identifier" => {
+            let (var, row, col) = get_source(decl, source);
+            Some(Statement::AddrAssign {
+                var,
+                points_to: String::new(),
+                row,
+                col,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -126,12 +355,27 @@ fn try_extract_return(node: Node, source: &str) -> Option<Statement> {
     match expr.kind() {
         "identifier" => {
             let (var, row, col) = get_source(expr, source);
-            Some(Statement::Return { var: var, row, col })
+            Some(Statement::Return {
+                var: var,
+                row,
+                col,
+                is_address_of: false,
+            })
         }
         "pointer_expression" => {
+            let operator = expr.child(0)?;
+            let op = &source[operator.start_byte()..operator.end_byte()];
+            if op != "&" {
+                return None;
+            }
             let operand = expr.named_child(0)?;
             let (var, row, col) = get_source(operand, source);
-            Some(Statement::Return { var: var, row, col })
+            Some(Statement::Return {
+                var,
+                row,
+                col,
+                is_address_of: true,
+            })
         }
         _ => None,
     }
@@ -176,7 +420,17 @@ fn try_extract_call(node: Node, source: &str) -> Option<Statement> {
                 col,
             })
         }
-        _ => None,
+        _ => {
+            let args = node.child_by_field_name("arguments")?;
+            let arg = args.named_child(0)?;
+            let (var, row, col) = get_source(arg, source);
+            Some(Statement::PassToFunction {
+                var,
+                func: func_name.to_string(),
+                row,
+                col,
+            })
+        }
     }
 }
 
@@ -188,12 +442,10 @@ fn malloc_var(node: Node, source: &str) -> Option<(String, usize, usize)> {
 
     match parent.kind() {
         "init_declarator" => {
-            let declarator = match parent.child_by_field_name("declarator") {
-                Some(d) => d,
-                None => return None,
-            };
-            let (var, line, col) = get_source(declarator, source);
-            Some((var, line, col))
+            let declarator = parent.child_by_field_name("declarator")?;
+            let inner = declarator.named_child(0).unwrap_or(declarator);
+            let (name, row, col) = get_source(inner, source);
+            Some((name, row, col))
         }
         "assignment_expression" => {
             let left = match parent.child_by_field_name("left") {
