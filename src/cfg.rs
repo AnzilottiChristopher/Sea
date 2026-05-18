@@ -9,6 +9,7 @@ use tree_sitter::Node;
 pub type Cfg = DiGraph<BasicBlock, ()>;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum Statement {
     Malloc {
         var: String,
