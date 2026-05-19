@@ -5,5 +5,5 @@ pub enum OwnershipState {
     Uninitialized,
     Null,
     OutOfScope,
-    // MaybeFreed,
+    MaybeFreed,
 }

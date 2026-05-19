@@ -127,4 +127,71 @@ mod tests {
             messages
         );
     }
+    #[test]
+    fn test_conditional_free() {
+        let messages = run("examples/conditional_free.c");
+        // should warn not error — maybe freed
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("possible use after free")),
+            "expected possible use after free but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_conditional_free_both() {
+        let messages = run("examples/conditional_free_both.c");
+        assert!(
+            messages.is_empty(),
+            "expected no issues but got: {:?}",
+            messages
+        );
+    }
+    #[test]
+    fn test_no_else() {
+        let messages = run("examples/no_else.c");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("possible double free") || m.contains("double free")),
+            "expected double free warning but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_nested_if() {
+        let messages = run("examples/nested_if.c");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("possible use after free")),
+            "expected possible use after free but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_free_in_else() {
+        let messages = run("examples/free_in_else.c");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("possible use after free")),
+            "expected possible use after free but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_valid_if_else() {
+        let messages = run("examples/valid_if_else.c");
+        assert!(
+            messages.is_empty(),
+            "expected no issues but got: {:?}",
+            messages
+        );
+    }
 }

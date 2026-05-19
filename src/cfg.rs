@@ -2,7 +2,7 @@ use crate::{
     analyzer_state::OwnershipState, diagnostics::Diagnostic, diagnostics::Severity,
     variable_info::VariableInfo,
 };
-use petgraph::graph::DiGraph;
+use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
 use tree_sitter::Node;
 
@@ -68,7 +68,6 @@ pub enum Statement {
 }
 
 pub struct BasicBlock {
-    pub id: usize,
     pub statements: Vec<Statement>,
 }
 
@@ -88,20 +87,53 @@ impl BlockState {
 
     pub fn merge(&self, other: &BlockState) -> BlockState {
         let mut merged = self.clone();
+        let all_vars: std::collections::HashSet<&String> = self
+            .ownership
+            .keys()
+            .chain(other.ownership.keys())
+            .collect();
 
-        // for (var, state) in &other.ownership {
-        //     match merged.ownership.get(var) {
-        //         Some(existing) if existing == state => {}
-        //         Some(_) => {
-        //             merged
-        //                 .ownership
-        //                 .insert(var.clone(), OwnershipState::MaybeFreed);
-        //         }
-        //         None => {
-        //             merged.ownership.insert(var.clone(), state.clone());
-        //         }
-        //     }
-        // }
+        for var in all_vars {
+            let state_a = self.ownership.get(var);
+            let state_b = other.ownership.get(var);
+
+            let merged_info = match (state_a, state_b) {
+                // same on both paths — keep it
+                (Some(a), Some(b)) if a.state == b.state => a.clone(),
+
+                // freed on either path — maybe freed
+                (Some(a), Some(b))
+                    if a.state == OwnershipState::Freed || b.state == OwnershipState::Freed =>
+                {
+                    let mut info = a.clone();
+                    info.state = OwnershipState::MaybeFreed;
+                    info
+                }
+
+                // maybe freed on either path — maybe freed
+                (Some(a), Some(b))
+                    if a.state == OwnershipState::MaybeFreed
+                        || b.state == OwnershipState::MaybeFreed =>
+                {
+                    let mut info = a.clone();
+                    info.state = OwnershipState::MaybeFreed;
+                    info
+                }
+
+                // only exists on one path
+                (Some(a), None) => a.clone(),
+                (None, Some(b)) => b.clone(),
+
+                // different non-freed states — take left
+                (Some(a), Some(_)) => a.clone(),
+
+                (None, None) => continue,
+            };
+
+            merged.ownership.insert(var.clone(), merged_info);
+        }
+
+        merged.scope_depth = self.scope_depth;
         merged
     }
     pub fn enter_scope(&mut self) {
@@ -115,6 +147,9 @@ impl BlockState {
         col: usize,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
+        if self.scope_depth == 0 {
+            return;
+        }
         let dying: Vec<String> = self
             .ownership
             .iter()
@@ -163,78 +198,112 @@ impl BlockState {
 
 pub fn build_cfg(node: Node, source: &str) -> Cfg {
     let mut cfg = Cfg::new();
-    let block = build_linear_block(node, source);
-    println!("collected {} statements:", block.statements.len());
-    for stmt in &block.statements {
-        println!("  {:?}", stmt);
-    }
-    cfg.add_node(block);
+    let entry = cfg.add_node(BasicBlock { statements: vec![] });
+    collect_statements(node, source, &mut cfg, entry);
     cfg
 }
 
-pub fn build_linear_block(node: Node, source: &str) -> BasicBlock {
-    let mut stmts: Vec<Statement> = Vec::new();
-    collect_statements(node, source, &mut stmts);
-    BasicBlock {
-        id: 0,
-        statements: stmts,
-    }
-}
-fn collect_statements(node: Node, source: &str, stmts: &mut Vec<Statement>) {
+// pub fn build_linear_block(node: Node, source: &str) -> BasicBlock {
+//     let mut stmts: Vec<Statement> = Vec::new();
+//     collect_statements(node, source, &mut stmts);
+//     BasicBlock { statements: stmts }
+// }
+fn collect_statements(node: Node, source: &str, cfg: &mut Cfg, current: NodeIndex) -> NodeIndex {
     match node.kind() {
         "call_expression" => {
             if let Some(stmt) = try_extract_call(node, source) {
-                stmts.push(stmt);
+                cfg[current].statements.push(stmt);
             }
+            current
         }
         "pointer_expression" => {
             if let Some(stmt) = try_extract_deref(node, source) {
-                stmts.push(stmt);
+                cfg[current].statements.push(stmt);
             }
+            current
         }
         "return_statement" => {
             if let Some(stmt) = try_extract_return(node, source) {
-                stmts.push(stmt);
+                cfg[current].statements.push(stmt);
             }
+            current
         }
         "field_expression" => {
             if let Some(stmt) = try_extract_field_access(node, source) {
-                stmts.push(stmt);
+                cfg[current].statements.push(stmt);
             }
+            current
         }
         "declaration" => {
             if let Some(stmt) = try_extract_declaration(node, source) {
-                stmts.push(stmt);
+                cfg[current].statements.push(stmt);
             }
             let mut cursor = node.walk();
+            let mut current = current;
             for child in node.children(&mut cursor) {
-                collect_statements(child, source, stmts);
+                current = collect_statements(child, source, cfg, current);
             }
+            current
         }
         "compound_statement" => {
-            stmts.push(Statement::EnterScope);
+            cfg[current].statements.push(Statement::EnterScope);
             let mut cursor = node.walk();
+            let mut current = current;
             for child in node.children(&mut cursor) {
-                collect_statements(child, source, stmts);
+                current = collect_statements(child, source, cfg, current);
             }
             let row = node.end_position().row + 1;
             let col = node.end_position().column;
-            stmts.push(Statement::ExitScope { row, col });
+            cfg[current]
+                .statements
+                .push(Statement::ExitScope { row, col });
+            current
         }
         "assignment_expression" => {
             if let Some(stmt) = try_extract_assignment(node, source) {
-                stmts.push(stmt);
+                cfg[current].statements.push(stmt);
             }
             let mut cursor = node.walk();
+            let mut current = current;
             for child in node.children(&mut cursor) {
-                collect_statements(child, source, stmts);
+                current = collect_statements(child, source, cfg, current);
             }
+            current
+        }
+        "if_statement" => {
+            let true_block = cfg.add_node(BasicBlock { statements: vec![] });
+            let false_block = cfg.add_node(BasicBlock { statements: vec![] });
+            let merge_block = cfg.add_node(BasicBlock { statements: vec![] });
+
+            cfg.add_edge(current, true_block, ());
+            cfg.add_edge(current, false_block, ());
+
+            let then_body = node.child_by_field_name("consequence");
+            let true_end = if let Some(body) = then_body {
+                collect_statements(body, source, cfg, true_block)
+            } else {
+                true_block
+            };
+
+            let else_body = node.child_by_field_name("alternative");
+            let false_end = if let Some(body) = else_body {
+                collect_statements(body, source, cfg, false_block)
+            } else {
+                false_block
+            };
+
+            cfg.add_edge(true_end, merge_block, ());
+            cfg.add_edge(false_end, merge_block, ());
+
+            merge_block
         }
         _ => {
             let mut cursor = node.walk();
+            let mut current = current;
             for child in node.children(&mut cursor) {
-                collect_statements(child, source, stmts);
+                current = collect_statements(child, source, cfg, current);
             }
+            current
         }
     }
 }
