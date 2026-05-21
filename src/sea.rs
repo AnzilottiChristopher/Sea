@@ -147,7 +147,11 @@ impl Sea {
                     }
                     Statement::EnterScope => state.enter_scope(),
                     Statement::ExitScope { row, col } => {
-                        state.exit_scope(file, *row, *col, &mut diagnostics);
+                        let incoming = block_in_states
+                            .get(&index)
+                            .map(|s| s.ownership.clone())
+                            .unwrap_or_default();
+                        state.exit_scope(file, *row, *col, &mut diagnostics, &incoming);
                     }
                     Statement::PointerAssign { var, points_to, .. } => {
                         if let Some(info) = state.ownership.get_mut(var) {
@@ -311,6 +315,7 @@ fn handle_free(
             //     severity: Severity::Warning,
             // });
         }
+        _ => {}
     }
 }
 
@@ -370,6 +375,7 @@ fn handle_deref(
                 severity: Severity::Error,
             });
         }
+        _ => {}
     }
 }
 
@@ -524,7 +530,11 @@ fn handle_return(
                     severity: Severity::Warning,
                 });
             }
-            _ => {}
+            _ => {
+                if let Some(info) = state.ownership.get_mut(var) {
+                    info.state = OwnershipState::Returned;
+                }
+            }
         }
     }
 }

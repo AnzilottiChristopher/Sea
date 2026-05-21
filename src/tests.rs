@@ -289,4 +289,44 @@ mod tests {
             messages
         );
     }
+    #[test]
+    fn test_do_while_valid() {
+        let messages = run("examples/do_while_valid.c");
+        assert!(
+            messages.is_empty(),
+            "expected no issues but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_do_while_free() {
+        let messages = run("examples/do_while_free.c");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("possible use after free")),
+            "expected possible use after free but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_do_while_double_free() {
+        let messages = run("examples/do_while_double_free.c");
+        assert!(
+            messages.iter().any(|m| m.contains("possible double free")),
+            "expected possible double free but got: {:?}",
+            messages
+        );
+    }
+    #[test]
+    fn test_memory_leak() {
+        let messages = run("examples/leak.c");
+        assert!(
+            messages.iter().any(|m| m.contains("memory leak")),
+            "expected memory leak but got: {:?}",
+            messages
+        );
+    }
 }

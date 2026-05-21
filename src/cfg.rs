@@ -1,6 +1,7 @@
 use crate::{
-    analyzer_state::OwnershipState, diagnostics::Diagnostic, diagnostics::Severity,
-    variable_info::VariableInfo,
+    analyzer_state::OwnershipState,
+    diagnostics::{Diagnostic, Severity},
+    variable_info::{AllocKind, VariableInfo},
 };
 use petgraph::graph::{DiGraph, NodeIndex};
 use std::collections::HashMap;
@@ -149,6 +150,7 @@ impl BlockState {
         line: usize,
         col: usize,
         diagnostics: &mut Vec<Diagnostic>,
+        incoming: &HashMap<String, VariableInfo>,
     ) {
         if self.scope_depth == 0 {
             return;
@@ -156,7 +158,9 @@ impl BlockState {
         let dying: Vec<String> = self
             .ownership
             .iter()
-            .filter(|(_, info)| info.scope_depth == self.scope_depth)
+            .filter(|(name, info)| {
+                info.scope_depth == self.scope_depth && !incoming.contains_key(*name)
+            })
             .map(|(name, _)| name.clone())
             .collect();
 
@@ -190,6 +194,19 @@ impl BlockState {
             }
             if let Some(info) = self.ownership.get_mut(ptr_name) {
                 info.state = OwnershipState::OutOfScope;
+            }
+        }
+        for name in &dying {
+            if let Some(info) = self.ownership.get(name) {
+                if info.alloc_kind == AllocKind::Heap && info.state == OwnershipState::Allocated {
+                    diagnostics.push(Diagnostic {
+                        file: file.to_string(),
+                        line,
+                        col,
+                        message: format!("memory leak of pointer '{}'", name),
+                        severity: Severity::Error,
+                    });
+                }
             }
         }
 
@@ -381,6 +398,26 @@ fn collect_statements(node: Node, source: &str, cfg: &mut Cfg, current: NodeInde
                 cfg.add_edge(prev_end, merge_block, ());
             }
             merge_block
+        }
+        "do_statement" => {
+            let header_block = cfg.add_node(BasicBlock { statements: vec![] });
+            let body_block = cfg.add_node(BasicBlock { statements: vec![] });
+            let exit_block = cfg.add_node(BasicBlock { statements: vec![] });
+
+            cfg.add_edge(current, body_block, ());
+
+            let body_end = if let Some(body) = node.child_by_field_name("body") {
+                collect_statements(body, source, cfg, body_block)
+            } else {
+                body_block
+            };
+
+            cfg.add_edge(body_end, header_block, ());
+
+            cfg.add_edge(header_block, body_block, ());
+            cfg.add_edge(header_block, exit_block, ());
+
+            exit_block
         }
         _ => {
             let mut cursor = node.walk();

@@ -6,4 +6,5 @@ pub enum OwnershipState {
     Null,
     OutOfScope,
     MaybeFreed,
+    Returned,
 }
