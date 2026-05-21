@@ -1,9 +1,11 @@
 #include <stdlib.h>
 int main() {
   int *p = malloc(sizeof(int));
-  if (1) {
-    free(p);
+  int i = 0;
+  while (i < 10) {
+    *p = i;
+    i = i + 1;
   }
-  *p = 5;
+  free(p);
   return 0;
 }

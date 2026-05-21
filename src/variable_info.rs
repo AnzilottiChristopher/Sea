@@ -6,7 +6,7 @@ pub enum AllocKind {
     Stack,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VariableInfo {
     pub state: OwnershipState,
     pub scope_depth: usize,

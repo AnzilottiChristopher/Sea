@@ -75,6 +75,7 @@ pub struct BasicBlock {
 pub struct BlockState {
     pub ownership: HashMap<String, VariableInfo>,
     pub scope_depth: usize,
+    pub base_scope_depth: usize,
 }
 
 impl BlockState {
@@ -82,6 +83,7 @@ impl BlockState {
         BlockState {
             ownership: HashMap::new(),
             scope_depth: 0,
+            base_scope_depth: 0,
         }
     }
 
@@ -134,6 +136,7 @@ impl BlockState {
         }
 
         merged.scope_depth = self.scope_depth;
+        merged.base_scope_depth = self.base_scope_depth;
         merged
     }
     pub fn enter_scope(&mut self) {
@@ -190,8 +193,9 @@ impl BlockState {
             }
         }
 
-        self.ownership
-            .retain(|_, info| info.scope_depth < self.scope_depth);
+        self.ownership.retain(|_, info| {
+            info.scope_depth <= self.base_scope_depth || info.scope_depth < self.scope_depth
+        });
         self.scope_depth -= 1;
     }
 }
@@ -297,6 +301,87 @@ fn collect_statements(node: Node, source: &str, cfg: &mut Cfg, current: NodeInde
 
             merge_block
         }
+        "while_statement" => {
+            let header_block = cfg.add_node(BasicBlock { statements: vec![] });
+            let body_block = cfg.add_node(BasicBlock { statements: vec![] });
+            let exit_block = cfg.add_node(BasicBlock { statements: vec![] });
+
+            cfg.add_edge(current, header_block, ());
+            cfg.add_edge(header_block, body_block, ());
+            cfg.add_edge(header_block, exit_block, ());
+
+            let body_end = if let Some(body) = node.child_by_field_name("body") {
+                collect_statements(body, source, cfg, body_block)
+            } else {
+                body_block
+            };
+
+            cfg.add_edge(body_end, header_block, ());
+
+            exit_block
+        }
+        "for_statement" => {
+            let header_block = cfg.add_node(BasicBlock { statements: vec![] });
+            let body_block = cfg.add_node(BasicBlock { statements: vec![] });
+            let exit_block = cfg.add_node(BasicBlock { statements: vec![] });
+            cfg.add_edge(current, header_block, ());
+            cfg.add_edge(header_block, body_block, ());
+            cfg.add_edge(header_block, exit_block, ());
+
+            // collect initializer into current block before the loop
+            if let Some(init) = node.child_by_field_name("initializer") {
+                collect_statements(init, source, cfg, current);
+            }
+
+            let body_end = if let Some(body) = node.child_by_field_name("body") {
+                collect_statements(body, source, cfg, body_block)
+            } else {
+                body_block
+            };
+
+            cfg.add_edge(body_end, header_block, ());
+            exit_block
+        }
+        "switch_statement" => {
+            let merge_block = cfg.add_node(BasicBlock { statements: vec![] });
+
+            if !has_default(node) {
+                cfg.add_edge(current, merge_block, ());
+            }
+
+            let mut prev_case_end: Option<NodeIndex> = None;
+
+            if let Some(body) = node.child_by_field_name("body") {
+                let mut cursor = body.walk();
+                for child in body.children(&mut cursor) {
+                    match child.kind() {
+                        "case_statement" | "default_statement" => {
+                            let case_block = cfg.add_node(BasicBlock { statements: vec![] });
+
+                            cfg.add_edge(current, case_block, ());
+
+                            if let Some(prev_end) = prev_case_end {
+                                cfg.add_edge(prev_end, case_block, ());
+                            }
+
+                            let case_end = collect_statements(child, source, cfg, case_block);
+
+                            if ends_with_break(child) {
+                                cfg.add_edge(case_end, merge_block, ());
+                                prev_case_end = None;
+                            } else {
+                                prev_case_end = Some(case_end);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(prev_end) = prev_case_end {
+                cfg.add_edge(prev_end, merge_block, ());
+            }
+            merge_block
+        }
         _ => {
             let mut cursor = node.walk();
             let mut current = current;
@@ -308,6 +393,31 @@ fn collect_statements(node: Node, source: &str, cfg: &mut Cfg, current: NodeInde
     }
 }
 
+fn ends_with_break(node: Node) -> bool {
+    // look at named children of the case_statement
+    // check if the last one is a break_statement
+    let count = node.named_child_count();
+    if count == 0 {
+        return false;
+    }
+    if let Some(last) = node.named_child((count - 1) as u32) {
+        last.kind() == "break_statement"
+    } else {
+        false
+    }
+}
+
+fn has_default(node: Node) -> bool {
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for child in body.children(&mut cursor) {
+            if child.kind() == "default_statement" {
+                return true;
+            }
+        }
+    }
+    false
+}
 fn try_extract_assignment(node: Node, source: &str) -> Option<Statement> {
     let left = node.child_by_field_name("left")?;
     let right = node.child_by_field_name("right")?;

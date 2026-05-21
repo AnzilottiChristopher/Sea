@@ -1,10 +1,12 @@
 #include <stdlib.h>
 int main(int argc, char *argv[]) {
   int *p = malloc(sizeof(int));
-  if (argc > 1) {
+  switch (argc) {
+  case 1:
     free(p);
-  } else {
-    free(p);
+  case 2:
+    *p = 5;
+    break;
   }
   return 0;
 }

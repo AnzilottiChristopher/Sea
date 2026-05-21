@@ -1,9 +1,9 @@
 #include <stdlib.h>
 int main() {
   int *p = malloc(sizeof(int));
-  if (1) {
-    free(p);
+  for (int i = 0; i < 10; i++) {
+    *p = i;
   }
-  *p = 5;
+  free(p);
   return 0;
 }

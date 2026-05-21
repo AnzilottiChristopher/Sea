@@ -194,4 +194,99 @@ mod tests {
             messages
         );
     }
+    #[test]
+    fn test_while_free() {
+        let messages = run("examples/while_free.c");
+        assert!(
+            messages.iter().any(
+                |m| m.contains("possible use after free") || m.contains("possible double free")
+            ),
+            "expected possible use after free or double free but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_while_valid() {
+        let messages = run("examples/while_valid.c");
+        assert!(
+            messages.is_empty(),
+            "expected no issues but got: {:?}",
+            messages
+        );
+    }
+    #[test]
+    fn test_for_valid() {
+        let messages = run("examples/for_valid.c");
+        assert!(
+            messages.is_empty(),
+            "expected no issues but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_for_free() {
+        let messages = run("examples/for_free.c");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("possible use after free")),
+            "expected possible use after free but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_for_double_free() {
+        let messages = run("examples/for_double_free.c");
+        assert!(
+            messages.iter().any(|m| m.contains("possible double free")),
+            "expected possible double free but got: {:?}",
+            messages
+        );
+    }
+    #[test]
+    fn test_switch_valid() {
+        let messages = run("examples/switch_valid.c");
+        assert!(
+            messages.is_empty(),
+            "expected no issues but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_switch_free() {
+        let messages = run("examples/switch_free.c");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("possible use after free")),
+            "expected possible use after free but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_switch_fallthrough() {
+        let messages = run("examples/switch_fallthrough.c");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("possible use after free")),
+            "expected possible use after free but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_switch_all_cases() {
+        let messages = run("examples/switch_all_cases.c");
+        assert!(
+            messages.is_empty(),
+            "expected no issues but got: {:?}",
+            messages
+        );
+    }
 }

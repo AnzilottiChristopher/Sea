@@ -4,7 +4,7 @@ use crate::{
     diagnostics::{Diagnostic, Severity},
     variable_info::{AllocKind, VariableInfo},
 };
-use petgraph::{algo::toposort, graph::NodeIndex};
+use petgraph::graph::NodeIndex;
 use std::{collections::HashMap, path::PathBuf};
 use tree_sitter::Tree;
 
@@ -39,35 +39,49 @@ impl Sea {
 
     pub fn analyze_cfg(&self, cfg: &Cfg, file: &str) -> Vec<Diagnostic> {
         let mut diagnostics: Vec<Diagnostic> = Vec::new();
+        let mut block_in_states: HashMap<NodeIndex, BlockState> = HashMap::new();
+        let mut block_out_states: HashMap<NodeIndex, BlockState> = HashMap::new();
 
-        let mut block_states: HashMap<NodeIndex, BlockState> = HashMap::new();
+        let mut worklist: Vec<NodeIndex> = vec![cfg.node_indices().next().unwrap()];
 
-        let order = match toposort(cfg, None) {
-            Ok(order) => order,
-            Err(_) => cfg.node_indices().collect(),
-        };
+        while let Some(index) = worklist.pop() {
+            let mut predecessors = cfg.neighbors_directed(index, petgraph::Direction::Incoming);
 
-        for index in order {
-            let mut predessors = cfg.neighbors_directed(index, petgraph::Direction::Incoming);
-
-            let incoming_state = match predessors.next() {
+            let incoming_state = match predecessors.next() {
                 None => BlockState::new(),
                 Some(first_pred) => {
-                    let mut state = block_states
+                    let mut state = block_out_states
                         .get(&first_pred)
                         .cloned()
                         .unwrap_or_else(BlockState::new);
 
-                    for pred in predessors {
-                        if let Some(pred_state) = block_states.get(&pred) {
+                    for pred in predecessors {
+                        if let Some(pred_state) = block_out_states.get(&pred) {
                             state = state.merge(pred_state);
                         }
                     }
                     state
                 }
             };
+            let old_state = block_in_states.get(&index).cloned();
+            let state_changed = match &old_state {
+                None => true,
+                Some(old) => old.ownership != incoming_state.ownership,
+            };
+
+            if !state_changed {
+                continue;
+            }
+
+            block_in_states.insert(index, incoming_state.clone());
 
             let mut state = incoming_state;
+            let leading_scopes = cfg[index]
+                .statements
+                .iter()
+                .take_while(|s| matches!(s, Statement::EnterScope))
+                .count();
+            state.base_scope_depth = state.scope_depth + leading_scopes;
             let block = &cfg[index];
 
             for stmt in &block.statements {
@@ -143,7 +157,12 @@ impl Sea {
                     }
                 }
             }
-            block_states.insert(index, state);
+            block_out_states.insert(index, state);
+            for successor in cfg.neighbors_directed(index, petgraph::Direction::Outgoing) {
+                if !worklist.contains(&successor) {
+                    worklist.push(successor);
+                }
+            }
         }
         diagnostics
     }

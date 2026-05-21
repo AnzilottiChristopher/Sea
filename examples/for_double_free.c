@@ -1,9 +1,9 @@
 #include <stdlib.h>
 int main() {
   int *p = malloc(sizeof(int));
-  if (1) {
+  for (int i = 0; i < 10; i++) {
     free(p);
   }
-  free(p); // definite double free — p is MaybeFreed then freed again
+  free(p);
   return 0;
 }
