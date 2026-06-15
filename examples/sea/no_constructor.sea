@@ -1,0 +1,7 @@
+class Dog {
+    pub String name;
+}
+
+int main() {
+
+}

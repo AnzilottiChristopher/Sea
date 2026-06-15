@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use crate::sea::Sea;
 
 #[derive(Parser, Debug)]
-#[command(name = "sea")]
-#[command(about = "A borrow checker for C code")]
+#[command(name = "lighthouse")]
+#[command(about = "Lighthouse - safety checker for Sea and C code")]
 struct Cli {
     file: PathBuf,
 }

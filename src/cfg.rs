@@ -77,14 +77,16 @@ pub struct BlockState {
     pub ownership: HashMap<String, VariableInfo>,
     pub scope_depth: usize,
     pub base_scope_depth: usize,
+    pub class_has_drop: bool,
 }
 
 impl BlockState {
-    pub fn new() -> Self {
+    pub fn new(class_has_drop: bool) -> Self {
         BlockState {
             ownership: HashMap::new(),
             scope_depth: 0,
             base_scope_depth: 0,
+            class_has_drop,
         }
     }
 
@@ -138,6 +140,7 @@ impl BlockState {
 
         merged.scope_depth = self.scope_depth;
         merged.base_scope_depth = self.base_scope_depth;
+        merged.class_has_drop = self.class_has_drop;
         merged
     }
     pub fn enter_scope(&mut self) {
@@ -199,6 +202,9 @@ impl BlockState {
         for name in &dying {
             if let Some(info) = self.ownership.get(name) {
                 if info.alloc_kind == AllocKind::Heap && info.state == OwnershipState::Allocated {
+                    if name.starts_with("this.") && self.class_has_drop {
+                        continue;
+                    }
                     diagnostics.push(Diagnostic {
                         file: file.to_string(),
                         line,

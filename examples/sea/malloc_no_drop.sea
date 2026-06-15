@@ -1,0 +1,17 @@
+// test_no_drop.sea
+class Buffer {
+    pub int *data;
+
+    pub Buffer(int size) {
+        this.data = malloc(sizeof(int) * size);
+    }
+
+    pub write(int value) {
+        this.data[0] = value;
+    }
+}
+
+int main() {
+    Buffer buf = new Buffer(10);
+    buf.write(42);
+}

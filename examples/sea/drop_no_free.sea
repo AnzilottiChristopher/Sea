@@ -1,0 +1,14 @@
+class Buffer {
+ pub int *data;
+
+    pub Buffer() {
+        this.data = malloc(sizeof(int));
+    }
+
+    pub drop() {
+        // forgot to call free
+    }
+}
+
+int main() {
+}

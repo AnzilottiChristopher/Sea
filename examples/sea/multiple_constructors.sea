@@ -1,0 +1,13 @@
+class Dog {
+    pub String name;
+
+    pub Dog(String name) {
+        this.name = name;
+    }
+
+    pub Dog() {
+    }
+}
+
+int main() {
+}

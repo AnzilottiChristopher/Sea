@@ -1,0 +1,14 @@
+class Dog {
+    pub String name;
+
+    pub Dog(String name) {
+        this.name = name;
+    }
+
+    int getBark() {
+        return 5;
+    }
+}
+
+int main() {
+}

@@ -1,0 +1,22 @@
+interface Bark {
+    pub bark();
+}
+
+interface Swim {
+    pub swim();
+}
+
+class Dog implements Bark, Swim {
+    pub String name;
+
+    pub Dog(String name) {
+        this.name = name;
+    }
+
+    pub bark() {
+        printf("Woof!\n");
+    }
+}
+
+int main() {
+}

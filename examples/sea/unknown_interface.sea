@@ -1,0 +1,10 @@
+class Dog implements NonExistent {
+    pub String name;
+
+    pub Dog(String name) {
+        this.name = name;
+    }
+}
+
+int main() {
+}

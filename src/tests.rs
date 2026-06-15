@@ -329,4 +329,106 @@ mod tests {
             messages
         );
     }
+
+    // Sea specific tests
+    #[test]
+    fn test_sea_malloc_no_drop() {
+        let messages = run("examples/sea/malloc_no_drop.sea");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("uses malloc in constructor but has no drop")),
+            "expected malloc without drop error but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_sea_malloc_with_drop() {
+        let messages = run("examples/sea/malloc_with_drop.sea");
+        assert!(
+            messages.is_empty(),
+            "expected no issues but got: {:?}",
+            messages
+        );
+    }
+    #[test]
+    fn test_sea_no_constructor() {
+        let messages = run("examples/sea/no_constructor.sea");
+        assert!(
+            messages.iter().any(|m| m.contains("has no constructor")),
+            "expected no constructor error but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_sea_multiple_constructors() {
+        let messages = run("examples/sea/multiple_constructors.sea");
+        assert!(
+            messages.iter().any(|m| m.contains("multiple constructors")),
+            "expected multiple constructors error but got: {:?}",
+            messages
+        );
+    }
+    #[test]
+    fn test_sea_missing_interface_method() {
+        let messages = run("examples/sea/missing_interface_method.sea");
+        assert!(
+            messages.iter().any(|m| m.contains("missing method 'swim'")),
+            "expected missing method error but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_sea_valid_interface() {
+        let messages = run("examples/sea/valid_interface.sea");
+        assert!(
+            messages.is_empty(),
+            "expected no issues but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_sea_unknown_interface() {
+        let messages = run("examples/sea/unknown_interface.sea");
+        assert!(
+            messages.iter().any(|m| m.contains("unknown interface")),
+            "expected unknown interface error but got: {:?}",
+            messages
+        );
+    }
+    #[test]
+    fn test_sea_drop_no_free() {
+        let messages = run("examples/sea/drop_no_free.sea");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("drop() but never calls free()")),
+            "expected drop without free warning but got: {:?}",
+            messages
+        );
+    }
+    #[test]
+    fn test_sea_unknown_parent() {
+        let messages = run("examples/sea/unknown_parent.sea");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("inherits unknown class")),
+            "expected unknown parent error but got: {:?}",
+            messages
+        );
+    }
+    #[test]
+    fn test_sea_c_style_method() {
+        let messages = run("examples/sea/c_style_method.sea");
+        assert!(
+            messages.iter().any(|m| m.contains("C style method")),
+            "expected C style method warning but got: {:?}",
+            messages
+        );
+    }
 }
