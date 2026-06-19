@@ -24,7 +24,6 @@ fn main() {
     let diagnostics = sea.analyze(&cli.file.to_string_lossy());
 
     if diagnostics.is_empty() {
-        println!("No issues found.");
     } else {
         for d in diagnostics {
             d.display();

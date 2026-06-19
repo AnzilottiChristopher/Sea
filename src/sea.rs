@@ -64,7 +64,7 @@ impl Sea {
         let mut diagnostics = Vec::new();
         let root = self.tree.root_node();
         if matches!(self.mode, CheckMode::Sea) {
-            let file_info = self.collect_file_info(); // renamed
+            let file_info = self.collect_file_info(file); // renamed
             let mut cursor = root.walk();
             for child in root.children(&mut cursor) {
                 match child.kind() {
@@ -118,7 +118,7 @@ impl Sea {
         diagnostics
     }
 
-    fn collect_file_info(&self) -> SeaFileInfo {
+    fn collect_file_info(&self, file_path: &str) -> SeaFileInfo {
         let mut class_info: HashMap<String, SeaClassInfo> = HashMap::new();
         let mut interface_methods: HashMap<String, Vec<String>> = HashMap::new();
         let root = self.tree.root_node();
@@ -126,6 +126,50 @@ impl Sea {
 
         for child in root.children(&mut cursor) {
             match child.kind() {
+                "import_declaration" => {
+                    // resolve imported file and collect its classes
+                    let path_node = child.child_by_field_name("path").unwrap();
+                    let path_text = &self.source[path_node.start_byte()..path_node.end_byte()];
+                    let path_str = path_text.trim_matches('"');
+
+                    let current_dir = std::path::Path::new(file_path)
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."));
+                    let imported_path = current_dir.join(format!("{}.sea", path_str));
+
+                    if imported_path.exists() {
+                        let imported_source = std::fs::read_to_string(&imported_path)
+                            .unwrap_or_default()
+                            .replace("\r\n", "\n");
+
+                        let mut parser = tree_sitter::Parser::new();
+                        parser
+                            .set_language(&tree_sitter_sea::LANGUAGE.into())
+                            .expect("Error loading Sea grammar");
+
+                        if let Some(imported_tree) = parser.parse(&imported_source, None) {
+                            let imported_root = imported_tree.root_node();
+                            let mut cursor2 = imported_root.walk();
+                            for imported_child in imported_root.children(&mut cursor2) {
+                                if imported_child.kind() == "class_declaration" {
+                                    let name_node =
+                                        imported_child.child_by_field_name("name").unwrap();
+                                    let class_name = imported_source
+                                        [name_node.start_byte()..name_node.end_byte()]
+                                        .to_string();
+                                    let mut has_drop = false;
+                                    let mut cursor3 = imported_child.walk();
+                                    for member in imported_child.children(&mut cursor3) {
+                                        if member.kind() == "drop_declaration" {
+                                            has_drop = true;
+                                        }
+                                    }
+                                    class_info.insert(class_name, SeaClassInfo { has_drop });
+                                }
+                            }
+                        }
+                    }
+                }
                 "class_declaration" => {
                     let name_node = child.child_by_field_name("name").unwrap();
                     let class_name =
