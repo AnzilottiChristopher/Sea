@@ -1,7 +1,7 @@
 class Buffer {
- pub int *data;
+    pub int *data;
 
-    pub Buffer() {
+    pub init() {
         this.data = malloc(sizeof(int));
     }
 

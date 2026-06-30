@@ -9,7 +9,7 @@ interface Swim {
 class Dog implements Bark, Swim {
     pub String name;
 
-    pub Dog(String name) {
+    pub init(String name) {
         this.name = name;
     }
 

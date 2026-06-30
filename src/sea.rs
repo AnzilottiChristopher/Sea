@@ -16,6 +16,7 @@ pub enum CheckMode {
 struct SeaClassInfo {
     has_drop: bool,
 }
+
 struct SeaFileInfo {
     class_info: HashMap<String, SeaClassInfo>,
     interface_methods: HashMap<String, Vec<String>>,
@@ -64,7 +65,7 @@ impl Sea {
         let mut diagnostics = Vec::new();
         let root = self.tree.root_node();
         if matches!(self.mode, CheckMode::Sea) {
-            let file_info = self.collect_file_info(file); // renamed
+            let file_info = self.collect_file_info(file);
             let mut cursor = root.walk();
             for child in root.children(&mut cursor) {
                 match child.kind() {
@@ -72,7 +73,6 @@ impl Sea {
                         let name_node = child.child_by_field_name("name").unwrap();
                         let class_name = &self.source[name_node.start_byte()..name_node.end_byte()];
 
-                        // updated to use file_info.class_info
                         let has_drop = file_info
                             .class_info
                             .get(class_name)
@@ -82,9 +82,7 @@ impl Sea {
                         let mut cursor2 = child.walk();
                         for member in child.children(&mut cursor2) {
                             match member.kind() {
-                                "constructor_declaration"
-                                | "method_declaration"
-                                | "drop_declaration" => {
+                                "init_declaration" | "method_declaration" | "drop_declaration" => {
                                     if let Some(body) = member.child_by_field_name("body") {
                                         let cfg = build_cfg(body, &self.source);
                                         diagnostics.extend(self.analyze_cfg(&cfg, file, has_drop));
@@ -127,7 +125,6 @@ impl Sea {
         for child in root.children(&mut cursor) {
             match child.kind() {
                 "import_declaration" => {
-                    // resolve imported file and collect its classes
                     let path_node = child.child_by_field_name("path").unwrap();
                     let path_text = &self.source[path_node.start_byte()..path_node.end_byte()];
                     let path_str = path_text.trim_matches('"');
@@ -223,13 +220,11 @@ impl Sea {
         let row = node.start_position().row + 1;
         let col = node.start_position().column;
 
-        // get implements clause
         let implements = match node.child_by_field_name("implements") {
             Some(n) => n,
-            None => return, // no interfaces — nothing to check
+            None => return,
         };
 
-        // collect interface names from implements clause
         let mut cursor = implements.walk();
         let interface_names: Vec<String> = implements
             .children(&mut cursor)
@@ -237,35 +232,21 @@ impl Sea {
             .map(|c| self.source[c.start_byte()..c.end_byte()].to_string())
             .collect();
 
-        // collect class method names
+        // collect class method names — no GLR workaround needed
         let mut class_methods: Vec<String> = Vec::new();
         let mut cursor2 = node.walk();
         for member in node.children(&mut cursor2) {
-            match member.kind() {
-                "method_declaration" => {
-                    let method_node = member.child(0).unwrap();
-                    if let Some(method_name_node) = method_node.child_by_field_name("name") {
-                        let method_name = self.source
-                            [method_name_node.start_byte()..method_name_node.end_byte()]
-                            .to_string();
-                        class_methods.push(method_name);
-                    }
-                }
-                "constructor_declaration" => {
-                    // GLR matched methods as constructors
-                    let con_name_node = member.child_by_field_name("name").unwrap();
-                    let con_name = self.source
-                        [con_name_node.start_byte()..con_name_node.end_byte()]
+            if member.kind() == "method_declaration" {
+                let method_node = member.child(0).unwrap();
+                if let Some(method_name_node) = method_node.child_by_field_name("name") {
+                    let method_name = self.source
+                        [method_name_node.start_byte()..method_name_node.end_byte()]
                         .to_string();
-                    if con_name != class_name {
-                        class_methods.push(con_name);
-                    }
+                    class_methods.push(method_name);
                 }
-                _ => {}
             }
         }
 
-        // check each interface
         for interface_name in &interface_names {
             if let Some(required_methods) = interface_methods.get(interface_name) {
                 for method in required_methods {
@@ -337,42 +318,32 @@ impl Sea {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
             match child.kind() {
-                "constructor_declaration" => {
-                    let con_name_node = child.child_by_field_name("name").unwrap();
-                    let con_name =
-                        &self.source[con_name_node.start_byte()..con_name_node.end_byte()];
-
-                    if con_name == class_name {
-                        has_constructor = true;
-                        constructor_count += 1;
-
-                        // check if constructor body contains malloc
-                        if let Some(body) = child.child_by_field_name("body") {
-                            if self.body_contains_malloc(&body) {
-                                has_malloc = true;
-                                malloc_row = child.start_position().row + 1;
-                                malloc_col = child.start_position().column;
-                            }
+                "init_declaration" => {
+                    // no name matching needed — init is always the constructor
+                    has_constructor = true;
+                    constructor_count += 1;
+                    if let Some(body) = child.child_by_field_name("body") {
+                        if self.body_contains_malloc(&body) {
+                            has_malloc = true;
+                            malloc_row = child.start_position().row + 1;
+                            malloc_col = child.start_position().column;
                         }
                     }
                 }
                 "drop_declaration" => {
                     has_drop = true;
-
                     if let Some(body) = child.child_by_field_name("body") {
                         if !self.body_contains_free(&body) {
                             let row = child.start_position().row + 1;
                             let col = child.start_position().column;
-                            let message = format!(
-                                "class '{}' has drop() but never calls free() — possible memory leak",
-                                class_name
-                            );
-
                             diagnostics.push(Diagnostic {
                                 file: file.to_string(),
                                 line: row,
                                 col,
-                                message,
+                                message: format!(
+                                    "class '{}' has drop() but never calls free() — possible memory leak",
+                                    class_name
+                                ),
                                 severity: Severity::Warning,
                             });
                         }
@@ -380,7 +351,6 @@ impl Sea {
                 }
                 "method_declaration" => {
                     let method_node = child.child(0).unwrap();
-                    // check if it's c_style_method
                     if method_node.kind() == "c_style_method" {
                         let row = child.start_position().row + 1;
                         let col = child.start_position().column;
@@ -394,7 +364,7 @@ impl Sea {
                             line: row,
                             col,
                             message: format!(
-                                "C style method '{}' detected — it's better to use Sea style: {}() -> {}",
+                                "C style method '{}' detected — use Sea style: {}() -> {}",
                                 method_name, method_name, type_text
                             ),
                             severity: Severity::Warning,
@@ -413,26 +383,24 @@ impl Sea {
                 line: row,
                 col,
                 message: format!(
-                    "class '{}' has no constructor -- add a '{}()' method",
-                    class_name, class_name
+                    "class '{}' has no constructor — add an 'init()' method",
+                    class_name
                 ),
                 severity: Severity::Error,
             });
         }
-        // TODO possibly remove the next rule if we ever support multiple constructors
+
         if constructor_count > 1 {
             let row = node.start_position().row + 1;
             let col = node.start_position().column;
-            let message = format!(
-                "class '{}' has multiple constructors — Sea does not support constructor overloading",
-                class_name
-            );
-
             diagnostics.push(Diagnostic {
                 file: file.to_string(),
                 line: row,
                 col,
-                message,
+                message: format!(
+                    "class '{}' has multiple constructors — Sea does not support constructor overloading",
+                    class_name
+                ),
                 severity: Severity::Error,
             });
         }
@@ -450,6 +418,7 @@ impl Sea {
             });
         }
     }
+
     fn body_contains_free(&self, node: &tree_sitter::Node) -> bool {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -471,7 +440,6 @@ impl Sea {
     fn body_contains_malloc(&self, node: &tree_sitter::Node) -> bool {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            // check if this node is a malloc call
             if child.kind() == "call_expression" {
                 if let Some(func) = child.child_by_field_name("function") {
                     let func_text = &self.source[func.start_byte()..func.end_byte()];
@@ -480,7 +448,6 @@ impl Sea {
                     }
                 }
             }
-            // recurse into children
             if self.body_contains_malloc(&child) {
                 return true;
             }
@@ -514,6 +481,7 @@ impl Sea {
                     state
                 }
             };
+
             let old_state = block_in_states.get(&index).cloned();
             let state_changed = match &old_state {
                 None => true,
@@ -621,89 +589,6 @@ impl Sea {
         }
         diagnostics
     }
-
-    // pub fn analyze_cfg_linear(&self, cfg: &Cfg, file: &str) -> Vec<Diagnostic> {
-    //     let mut diagnostics: Vec<Diagnostic> = Vec::new();
-    //     let mut state = BlockState::new();
-    //
-    //     for index in cfg.node_indices() {
-    //         let block = &cfg[index];
-    //         for stmt in &block.statements {
-    //             match stmt {
-    //                 Statement::Malloc { var, .. } => {
-    //                     state
-    //                         .ownership
-    //                         .insert(var.clone(), VariableInfo::heap(state.scope_depth));
-    //                 }
-    //                 Statement::Free { var, row, col } => {
-    //                     handle_free(var, *row, *col, file, &mut state, &mut diagnostics);
-    //                 }
-    //                 Statement::Deref { var, row, col } => {
-    //                     handle_deref(var, *row, *col, file, &mut state, &mut diagnostics);
-    //                 }
-    //                 Statement::FieldAccess { var, row, col } => {
-    //                     handle_field_access(var, *row, *col, file, &mut state, &mut diagnostics);
-    //                 }
-    //                 Statement::PassToFunction {
-    //                     var,
-    //                     func,
-    //                     row,
-    //                     col,
-    //                 } => {
-    //                     handle_pass_freed_pointer(
-    //                         var,
-    //                         func,
-    //                         *row,
-    //                         *col,
-    //                         file,
-    //                         &mut state,
-    //                         &mut diagnostics,
-    //                     );
-    //                 }
-    //                 Statement::Return {
-    //                     var,
-    //                     row,
-    //                     col,
-    //                     is_address_of,
-    //                 } => {
-    //                     handle_return(
-    //                         var,
-    //                         *row,
-    //                         *col,
-    //                         *is_address_of,
-    //                         file,
-    //                         &mut state,
-    //                         &mut diagnostics,
-    //                     );
-    //                 }
-    //                 Statement::NullAssign { var, .. } => {
-    //                     state
-    //                         .ownership
-    //                         .insert(var.clone(), VariableInfo::null(state.scope_depth));
-    //                 }
-    //                 Statement::AddrAssign { var, points_to, .. } => {
-    //                     let mut info = VariableInfo::stack(state.scope_depth);
-    //                     if !points_to.is_empty() {
-    //                         info.state = OwnershipState::Allocated;
-    //                         info.points_to = Some(points_to.clone());
-    //                     }
-    //                     state.ownership.insert(var.clone(), info);
-    //                 }
-    //                 Statement::EnterScope => state.enter_scope(),
-    //                 Statement::ExitScope { row, col } => {
-    //                     state.exit_scope(file, *row, *col, &mut diagnostics);
-    //                 }
-    //                 Statement::PointerAssign { var, points_to, .. } => {
-    //                     if let Some(info) = state.ownership.get_mut(var) {
-    //                         info.points_to = Some(points_to.clone());
-    //                         info.state = OwnershipState::Allocated;
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-    //     diagnostics
-    // }
 }
 
 fn handle_free(
@@ -757,15 +642,7 @@ fn handle_free(
                 severity: Severity::Warning,
             });
         }
-        None => {
-            // diagnostics.push(Diagnostic {
-            //     file: file.to_string(),
-            //     line: row,
-            //     col,
-            //     message: format!("free of untracked pointer '{}'", var),
-            //     severity: Severity::Warning,
-            // });
-        }
+        None => {}
         _ => {}
     }
 }

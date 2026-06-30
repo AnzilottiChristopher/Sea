@@ -1,7 +1,7 @@
 class Dog inherit NonExistent {
     pub String name;
 
-    pub Dog(String name) {
+    pub init(String name) {
         this.name = name;
     }
 }

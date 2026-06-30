@@ -5,7 +5,7 @@ interface Bark {
 class Dog implements Bark {
     pub String name;
 
-    pub Dog(String name) {
+    pub init(String name) {
         this.name = name;
     }
 
