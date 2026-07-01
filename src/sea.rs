@@ -5,7 +5,8 @@ use crate::{
     variable_info::{AllocKind, VariableInfo},
 };
 use petgraph::graph::NodeIndex;
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use tree_sitter::Tree;
 
 pub enum CheckMode {
@@ -13,8 +14,15 @@ pub enum CheckMode {
     Sea,
 }
 
+struct SeaMethodInfo {
+    name: String,
+    param_count: usize,
+}
+
 struct SeaClassInfo {
     has_drop: bool,
+    methods: Vec<SeaMethodInfo>,
+    field_names: Vec<String>,
 }
 
 struct SeaFileInfo {
@@ -27,6 +35,54 @@ pub struct Sea {
     tree: Tree,
     mode: CheckMode,
 }
+
+// ─── Scope for semantic checks ───────────────────────────────────────────────
+
+struct Scope {
+    /// variable name → type name
+    locals: HashMap<String, String>,
+    /// all known class names (from file + imports)
+    classes: HashSet<String>,
+}
+
+impl Scope {
+    fn new(file_info: &SeaFileInfo, params: &[(String, String)]) -> Self {
+        let mut locals = HashMap::new();
+        let mut classes = HashSet::new();
+
+        for name in file_info.class_info.keys() {
+            classes.insert(name.clone());
+        }
+
+        for (type_name, var_name) in params {
+            locals.insert(var_name.clone(), type_name.clone());
+        }
+
+        Scope { locals, classes }
+    }
+
+    fn declare(&mut self, var_name: String, type_name: String) {
+        self.locals.insert(var_name, type_name);
+    }
+
+    fn get_type(&self, var_name: &str) -> Option<&String> {
+        self.locals.get(var_name)
+    }
+
+    fn is_known_class(&self, name: &str) -> bool {
+        self.classes.contains(name)
+    }
+}
+
+// ─── Primitive type set ───────────────────────────────────────────────────────
+
+const PRIMITIVES: &[&str] = &["int", "char", "float", "double", "void", "String", "bool"];
+
+fn is_primitive(t: &str) -> bool {
+    PRIMITIVES.contains(&t)
+}
+
+// ─── impl Sea ────────────────────────────────────────────────────────────────
 
 impl Sea {
     pub fn new(path: &PathBuf) -> Self {
@@ -64,9 +120,11 @@ impl Sea {
     pub fn analyze(&self, file: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         let root = self.tree.root_node();
+
         if matches!(self.mode, CheckMode::Sea) {
             let file_info = self.collect_file_info(file);
             let mut cursor = root.walk();
+
             for child in root.children(&mut cursor) {
                 match child.kind() {
                     "class_declaration" => {
@@ -82,15 +140,65 @@ impl Sea {
                         let mut cursor2 = child.walk();
                         for member in child.children(&mut cursor2) {
                             match member.kind() {
-                                "init_declaration" | "method_declaration" | "drop_declaration" => {
+                                "init_declaration" => {
+                                    // CFG ownership analysis
                                     if let Some(body) = member.child_by_field_name("body") {
                                         let cfg = build_cfg(body, &self.source);
                                         diagnostics.extend(self.analyze_cfg(&cfg, file, has_drop));
+                                    }
+                                    // semantic checks
+                                    let params = self.collect_method_params(&member);
+                                    if let Some(body) = member.child_by_field_name("body") {
+                                        self.check_method_body(
+                                            &body,
+                                            class_name,
+                                            file,
+                                            &mut diagnostics,
+                                            &file_info,
+                                            params,
+                                        );
+                                    }
+                                }
+                                "method_declaration" => {
+                                    let method_node = member.child(0).unwrap();
+                                    // CFG ownership analysis
+                                    if let Some(body) = method_node.child_by_field_name("body") {
+                                        let cfg = build_cfg(body, &self.source);
+                                        diagnostics.extend(self.analyze_cfg(&cfg, file, has_drop));
+                                    }
+                                    // semantic checks
+                                    let params = self.collect_method_params(&method_node);
+                                    if let Some(body) = method_node.child_by_field_name("body") {
+                                        self.check_method_body(
+                                            &body,
+                                            class_name,
+                                            file,
+                                            &mut diagnostics,
+                                            &file_info,
+                                            params,
+                                        );
+                                    }
+                                }
+                                "drop_declaration" => {
+                                    if let Some(body) = member.child_by_field_name("body") {
+                                        let cfg = build_cfg(body, &self.source);
+                                        diagnostics.extend(self.analyze_cfg(&cfg, file, has_drop));
+                                    }
+                                    if let Some(body) = member.child_by_field_name("body") {
+                                        self.check_method_body(
+                                            &body,
+                                            class_name,
+                                            file,
+                                            &mut diagnostics,
+                                            &file_info,
+                                            vec![],
+                                        );
                                     }
                                 }
                                 _ => {}
                             }
                         }
+
                         self.check_class(&child, file, &mut diagnostics, &file_info);
                         self.check_class_interfaces(
                             &child,
@@ -102,6 +210,18 @@ impl Sea {
                     "main_declaration" => {
                         let cfg = build_cfg(child, &self.source);
                         diagnostics.extend(self.analyze_cfg(&cfg, file, false));
+
+                        // semantic checks for main body
+                        if let Some(body) = child.child_by_field_name("body") {
+                            self.check_method_body(
+                                &body,
+                                "",
+                                file,
+                                &mut diagnostics,
+                                &file_info,
+                                vec![],
+                            );
+                        }
                     }
                     _ => {
                         let cfg = build_cfg(child, &self.source);
@@ -113,8 +233,11 @@ impl Sea {
             let cfg = build_cfg(root, &self.source);
             diagnostics.extend(self.analyze_cfg(&cfg, file, false));
         }
+
         diagnostics
     }
+
+    // ─── Collect file-level info (classes, interfaces, imports) ──────────────
 
     fn collect_file_info(&self, file_path: &str) -> SeaFileInfo {
         let mut class_info: HashMap<String, SeaClassInfo> = HashMap::new();
@@ -149,36 +272,17 @@ impl Sea {
                             let mut cursor2 = imported_root.walk();
                             for imported_child in imported_root.children(&mut cursor2) {
                                 if imported_child.kind() == "class_declaration" {
-                                    let name_node =
-                                        imported_child.child_by_field_name("name").unwrap();
-                                    let class_name = imported_source
-                                        [name_node.start_byte()..name_node.end_byte()]
-                                        .to_string();
-                                    let mut has_drop = false;
-                                    let mut cursor3 = imported_child.walk();
-                                    for member in imported_child.children(&mut cursor3) {
-                                        if member.kind() == "drop_declaration" {
-                                            has_drop = true;
-                                        }
-                                    }
-                                    class_info.insert(class_name, SeaClassInfo { has_drop });
+                                    let info = self
+                                        .extract_class_info_from(&imported_child, &imported_source);
+                                    class_info.insert(info.0, info.1);
                                 }
                             }
                         }
                     }
                 }
                 "class_declaration" => {
-                    let name_node = child.child_by_field_name("name").unwrap();
-                    let class_name =
-                        self.source[name_node.start_byte()..name_node.end_byte()].to_string();
-                    let mut has_drop = false;
-                    let mut cursor2 = child.walk();
-                    for member in child.children(&mut cursor2) {
-                        if member.kind() == "drop_declaration" {
-                            has_drop = true;
-                        }
-                    }
-                    class_info.insert(class_name, SeaClassInfo { has_drop });
+                    let info = self.extract_class_info_from(&child, &self.source);
+                    class_info.insert(info.0, info.1);
                 }
                 "interface_declaration" => {
                     let name_node = child.child_by_field_name("name").unwrap();
@@ -208,6 +312,366 @@ impl Sea {
         }
     }
 
+    /// Extract `SeaClassInfo` from a `class_declaration` node, using the
+    /// provided source string (may differ from `self.source` for imports).
+    fn extract_class_info_from(
+        &self,
+        node: &tree_sitter::Node,
+        source: &str,
+    ) -> (String, SeaClassInfo) {
+        let name_node = node.child_by_field_name("name").unwrap();
+        let class_name = source[name_node.start_byte()..name_node.end_byte()].to_string();
+
+        let mut has_drop = false;
+        let mut methods: Vec<SeaMethodInfo> = Vec::new();
+        let mut field_names: Vec<String> = Vec::new();
+
+        let mut cursor = node.walk();
+        for member in node.children(&mut cursor) {
+            match member.kind() {
+                "drop_declaration" => {
+                    has_drop = true;
+                }
+                "field_declaration" => {
+                    if let Some(name_node) = member.child_by_field_name("name") {
+                        let field_name =
+                            source[name_node.start_byte()..name_node.end_byte()].to_string();
+                        field_names.push(field_name);
+                    }
+                }
+                "method_declaration" => {
+                    let method_node = member.child(0).unwrap();
+                    if let Some(method_name_node) = method_node.child_by_field_name("name") {
+                        let method_name = source
+                            [method_name_node.start_byte()..method_name_node.end_byte()]
+                            .to_string();
+                        let param_count = self.count_params_in_node(&method_node, source);
+                        methods.push(SeaMethodInfo {
+                            name: method_name,
+                            param_count,
+                        });
+                    }
+                }
+                "init_declaration" => {
+                    let param_count = self.count_params_in_node(&member, source);
+                    methods.push(SeaMethodInfo {
+                        name: "init".to_string(),
+                        param_count,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        (
+            class_name,
+            SeaClassInfo {
+                has_drop,
+                methods,
+                field_names,
+            },
+        )
+    }
+
+    fn count_params_in_node(&self, node: &tree_sitter::Node, source: &str) -> usize {
+        match node.child_by_field_name("parameters") {
+            Some(params_node) => {
+                let mut cursor = params_node.walk();
+                params_node
+                    .children(&mut cursor)
+                    .filter(|c| c.kind() == "sea_parameter")
+                    .count()
+            }
+            None => 0,
+        }
+    }
+
+    fn collect_method_params(&self, node: &tree_sitter::Node) -> Vec<(String, String)> {
+        let mut params = Vec::new();
+        if let Some(params_node) = node.child_by_field_name("parameters") {
+            let mut cursor = params_node.walk();
+            for param in params_node.children(&mut cursor) {
+                if param.kind() == "sea_parameter" {
+                    if let (Some(type_node), Some(name_node)) = (
+                        param.child_by_field_name("type"),
+                        param.child_by_field_name("name"),
+                    ) {
+                        let type_text =
+                            self.source[type_node.start_byte()..type_node.end_byte()].to_string();
+                        let name_text =
+                            self.source[name_node.start_byte()..name_node.end_byte()].to_string();
+                        params.push((type_text, name_text));
+                    }
+                }
+            }
+        }
+        params
+    }
+
+    // ─── Semantic body checker ────────────────────────────────────────────────
+
+    fn check_method_body(
+        &self,
+        body: &tree_sitter::Node,
+        class_name: &str,
+        file: &str,
+        diagnostics: &mut Vec<Diagnostic>,
+        file_info: &SeaFileInfo,
+        params: Vec<(String, String)>,
+    ) {
+        let mut scope = Scope::new(file_info, &params);
+
+        // add class fields into scope so `this.field` lookups resolve
+        if let Some(class_info) = file_info.class_info.get(class_name) {
+            for field_name in &class_info.field_names {
+                scope.declare(field_name.clone(), "field".to_string());
+            }
+        }
+
+        self.check_body_node(body, class_name, file, diagnostics, file_info, &mut scope);
+    }
+
+    fn check_body_node(
+        &self,
+        node: &tree_sitter::Node,
+        class_name: &str,
+        file: &str,
+        diagnostics: &mut Vec<Diagnostic>,
+        file_info: &SeaFileInfo,
+        scope: &mut Scope,
+    ) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "{" | "}" => {}
+
+                "declaration" => {
+                    // resolve the declared type
+                    let type_text = child
+                        .child_by_field_name("type")
+                        .or_else(|| {
+                            let mut c = child.walk();
+                            child
+                                .children(&mut c)
+                                .find(|n| n.kind() == "type_identifier")
+                        })
+                        .map(|n| self.source[n.start_byte()..n.end_byte()].to_string());
+
+                    if let Some(ref t) = type_text {
+                        // check unknown type
+                        if !is_primitive(t) && !scope.is_known_class(t) {
+                            let row = child.start_position().row + 1;
+                            let col = child.start_position().column;
+                            diagnostics.push(Diagnostic {
+                                file: file.to_string(),
+                                line: row,
+                                col,
+                                message: format!("unknown type '{}'", t),
+                                severity: Severity::Error,
+                            });
+                        }
+
+                        // register the variable name in scope
+                        let mut c = child.walk();
+                        if let Some(init_node) = child
+                            .children(&mut c)
+                            .find(|n| n.kind() == "init_declarator")
+                        {
+                            if let Some(decl_node) = init_node.child_by_field_name("declarator") {
+                                let var_name = self.source
+                                    [decl_node.start_byte()..decl_node.end_byte()]
+                                    .to_string();
+                                scope.declare(var_name, t.clone());
+                            }
+                        } else {
+                            // plain declaration without initializer: `Animal a;`
+                            let mut c2 = child.walk();
+                            if let Some(decl_node) =
+                                child.children(&mut c2).find(|n| n.kind() == "identifier")
+                            {
+                                let var_name = self.source
+                                    [decl_node.start_byte()..decl_node.end_byte()]
+                                    .to_string();
+                                scope.declare(var_name, t.clone());
+                            }
+                        }
+                    }
+
+                    // recurse into rhs to check expressions inside
+                    self.check_body_node(&child, class_name, file, diagnostics, file_info, scope);
+                }
+
+                "expression_statement" => {
+                    self.check_body_node(&child, class_name, file, diagnostics, file_info, scope);
+                }
+
+                "call_expression" => {
+                    if let Some(func) = child.child_by_field_name("function") {
+                        if func.kind() == "field_expression" {
+                            let obj = func.child_by_field_name("argument").unwrap();
+                            let method = func.child_by_field_name("field").unwrap();
+                            let obj_text =
+                                self.source[obj.start_byte()..obj.end_byte()].to_string();
+                            let method_text =
+                                self.source[method.start_byte()..method.end_byte()].to_string();
+
+                            let resolved_type = if obj_text == "this" {
+                                if class_name.is_empty() {
+                                    None
+                                } else {
+                                    Some(class_name.to_string())
+                                }
+                            } else {
+                                scope.get_type(&obj_text).cloned()
+                            };
+
+                            match resolved_type {
+                                Some(ref type_name) => {
+                                    if file_info.class_info.contains_key(type_name.as_str()) {
+                                        // check method exists and arg count
+                                        let arg_count = self.count_call_args(&child);
+                                        self.check_method_call(
+                                            type_name,
+                                            &method_text,
+                                            arg_count,
+                                            child.start_position().row + 1,
+                                            child.start_position().column,
+                                            file,
+                                            diagnostics,
+                                            file_info,
+                                        );
+                                    }
+                                    // if type not a known Sea class, silently allow (C type)
+                                }
+                                None => {
+                                    if obj_text != "this" {
+                                        let row = child.start_position().row + 1;
+                                        let col = child.start_position().column;
+                                        diagnostics.push(Diagnostic {
+                                            file: file.to_string(),
+                                            line: row,
+                                            col,
+                                            message: format!("undefined variable '{}'", obj_text),
+                                            severity: Severity::Error,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        // plain call (printf, malloc, etc.) — silently allow
+                    }
+
+                    // recurse into args
+                    self.check_body_node(&child, class_name, file, diagnostics, file_info, scope);
+                }
+
+                "assignment_expression" => {
+                    // check rhs — lhs is always a declared var or field so skip
+                    if let Some(rhs) = child.child_by_field_name("right") {
+                        self.check_body_node(&rhs, class_name, file, diagnostics, file_info, scope);
+                    }
+                }
+
+                "return_statement" | "if_statement" | "while_statement" | "for_statement"
+                | "switch_statement" => {
+                    self.check_body_node(&child, class_name, file, diagnostics, file_info, scope);
+                }
+
+                // new_expression — check constructor arg count
+                "new_expression" => {
+                    let type_text = child
+                        .child_by_field_name("type")
+                        .map(|n| self.source[n.start_byte()..n.end_byte()].to_string());
+
+                    if let Some(ref t) = type_text {
+                        if !scope.is_known_class(t) && !is_primitive(t) {
+                            let row = child.start_position().row + 1;
+                            let col = child.start_position().column;
+                            diagnostics.push(Diagnostic {
+                                file: file.to_string(),
+                                line: row,
+                                col,
+                                message: format!("unknown class '{}'", t),
+                                severity: Severity::Error,
+                            });
+                        } else if let Some(ref t) = type_text {
+                            let arg_count = self.count_call_args(&child);
+                            self.check_method_call(
+                                t,
+                                "init",
+                                arg_count,
+                                child.start_position().row + 1,
+                                child.start_position().column,
+                                file,
+                                diagnostics,
+                                file_info,
+                            );
+                        }
+                    }
+                }
+
+                _ => {
+                    self.check_body_node(&child, class_name, file, diagnostics, file_info, scope);
+                }
+            }
+        }
+    }
+
+    fn check_method_call(
+        &self,
+        class_name: &str,
+        method_name: &str,
+        arg_count: usize,
+        row: usize,
+        col: usize,
+        file: &str,
+        diagnostics: &mut Vec<Diagnostic>,
+        file_info: &SeaFileInfo,
+    ) {
+        if let Some(class_info) = file_info.class_info.get(class_name) {
+            if let Some(method) = class_info.methods.iter().find(|m| m.name == method_name) {
+                // method exists — check arg count
+                if arg_count != method.param_count {
+                    diagnostics.push(Diagnostic {
+                        file: file.to_string(),
+                        line: row,
+                        col,
+                        message: format!(
+                            "method '{}' on '{}' expects {} argument(s) but got {}",
+                            method_name, class_name, method.param_count, arg_count
+                        ),
+                        severity: Severity::Error,
+                    });
+                }
+            } else {
+                // method doesn't exist on the class
+                diagnostics.push(Diagnostic {
+                    file: file.to_string(),
+                    line: row,
+                    col,
+                    message: format!(
+                        "no method '{}' found on class '{}'",
+                        method_name, class_name
+                    ),
+                    severity: Severity::Error,
+                });
+            }
+        }
+    }
+
+    fn count_call_args(&self, node: &tree_sitter::Node) -> usize {
+        if let Some(args) = node.child_by_field_name("arguments") {
+            let mut cursor = args.walk();
+            args.children(&mut cursor)
+                .filter(|c| c.kind() != "(" && c.kind() != ")" && c.kind() != ",")
+                .count()
+        } else {
+            0
+        }
+    }
+
+    // ─── Existing class-level checks (unchanged) ──────────────────────────────
+
     fn check_class_interfaces(
         &self,
         node: &tree_sitter::Node,
@@ -232,7 +696,6 @@ impl Sea {
             .map(|c| self.source[c.start_byte()..c.end_byte()].to_string())
             .collect();
 
-        // collect class method names — no GLR workaround needed
         let mut class_methods: Vec<String> = Vec::new();
         let mut cursor2 = node.walk();
         for member in node.children(&mut cursor2) {
@@ -319,7 +782,6 @@ impl Sea {
         for child in node.children(&mut cursor) {
             match child.kind() {
                 "init_declaration" => {
-                    // no name matching needed — init is always the constructor
                     has_constructor = true;
                     constructor_count += 1;
                     if let Some(body) = child.child_by_field_name("body") {
@@ -455,6 +917,8 @@ impl Sea {
         false
     }
 
+    // ─── CFG ownership analysis (unchanged) ───────────────────────────────────
+
     pub fn analyze_cfg(&self, cfg: &Cfg, file: &str, class_has_drop: bool) -> Vec<Diagnostic> {
         let mut diagnostics: Vec<Diagnostic> = Vec::new();
         let mut block_in_states: HashMap<NodeIndex, BlockState> = HashMap::new();
@@ -580,16 +1044,21 @@ impl Sea {
                     }
                 }
             }
+
             block_out_states.insert(index, state);
+
             for successor in cfg.neighbors_directed(index, petgraph::Direction::Outgoing) {
                 if !worklist.contains(&successor) {
                     worklist.push(successor);
                 }
             }
         }
+
         diagnostics
     }
 }
+
+// ─── Free functions for CFG handlers (unchanged) ─────────────────────────────
 
 fn handle_free(
     var: &str,
@@ -632,7 +1101,6 @@ fn handle_free(
                 severity: Severity::Warning,
             });
         }
-        Some(OwnershipState::OutOfScope) => {}
         Some(OwnershipState::MaybeFreed) => {
             diagnostics.push(Diagnostic {
                 file: file.to_string(),
@@ -642,7 +1110,6 @@ fn handle_free(
                 severity: Severity::Warning,
             });
         }
-        None => {}
         _ => {}
     }
 }
@@ -683,8 +1150,6 @@ fn handle_deref(
                 severity: Severity::Error,
             });
         }
-        Some(OwnershipState::Allocated) => {}
-        Some(OwnershipState::OutOfScope) => {}
         Some(OwnershipState::MaybeFreed) => {
             diagnostics.push(Diagnostic {
                 file: file.to_string(),
@@ -824,15 +1289,14 @@ fn handle_return(
     if is_address_of {
         match state.ownership.get(var) {
             Some(info) if info.alloc_kind == AllocKind::Stack => {
-                let message = format!(
-                    "returning address of stack variable '{}' which will be invalid after function returns",
-                    var
-                );
                 diagnostics.push(Diagnostic {
                     file: file.to_string(),
                     line: row,
                     col,
-                    message,
+                    message: format!(
+                        "returning address of stack variable '{}' which will be invalid after function returns",
+                        var
+                    ),
                     severity: Severity::Error,
                 });
             }
