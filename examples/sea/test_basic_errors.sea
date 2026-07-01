@@ -1,0 +1,16 @@
+class Animal {
+    pub String name;
+    pub init(String name) {
+        this.name = name;
+    }
+    pub bark() {
+        printf("Bark\n");
+    }
+}
+
+main() -> int {
+    Animal a = new Animal("rex", 99);  // wrong arg count — expects 1 not 2
+    a.bark(123);                        // bark takes 0 args
+    a.woof();                           // method doesn't exist
+    Dog d = new Dog();                  // unknown class
+}

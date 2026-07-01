@@ -121,6 +121,8 @@ impl Sea {
         let mut diagnostics = Vec::new();
         let root = self.tree.root_node();
 
+        self.check_parse_errors(&root, file, &mut diagnostics);
+
         if matches!(self.mode, CheckMode::Sea) {
             let file_info = self.collect_file_info(file);
             let mut cursor = root.walk();
@@ -235,6 +237,47 @@ impl Sea {
         }
 
         diagnostics
+    }
+
+    // Collect errors made
+    fn check_parse_errors(
+        &self,
+        node: &tree_sitter::Node,
+        file: &str,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        if node.is_error() {
+            let row = node.start_position().row + 1;
+            let col = node.start_position().column;
+            let text = &self.source[node.start_byte()..node.end_byte()];
+            diagnostics.push(Diagnostic {
+                file: file.to_string(),
+                line: row,
+                col,
+                message: format!("syntax error: unexpected '{}'", text.trim()),
+                severity: Severity::Error,
+            });
+            // don't recurse into error nodes — the whole subtree is garbage
+            return;
+        }
+
+        if node.is_missing() {
+            let row = node.start_position().row + 1;
+            let col = node.start_position().column;
+            diagnostics.push(Diagnostic {
+                file: file.to_string(),
+                line: row,
+                col,
+                message: format!("syntax error: missing '{}'", node.kind()),
+                severity: Severity::Error,
+            });
+            return;
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.check_parse_errors(&child, file, diagnostics);
+        }
     }
 
     // ─── Collect file-level info (classes, interfaces, imports) ──────────────
