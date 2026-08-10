@@ -1085,6 +1085,14 @@ impl Sea {
                             info.state = OwnershipState::Allocated;
                         }
                     }
+                    Statement::Move {
+                        from,
+                        to,
+                        row,
+                        col,
+                    } => {
+                        handle_move(from, to, *row, *col, file, &mut state, &mut diagnostics);
+                    }
                 }
             }
 
@@ -1111,15 +1119,27 @@ fn handle_free(
     state: &mut BlockState,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    // A subscript-keyed name like "args[i]" is a synthetic, non-index-sensitive
+    // stand-in for "whichever element the current index refers to" — the same
+    // text can (and typically does) denote a different concrete allocation on
+    // each loop iteration. Flagging a repeat free() on that text as a double
+    // free would misfire on the ordinary "free every element in a loop" idiom,
+    // so double-free diagnostics are skipped for these; the Allocated->Freed
+    // transition below still runs, which is what keeps scope-exit leak
+    // checking accurate.
+    let is_array_element = var.contains('[');
+
     match state.ownership.get(var).map(|v| &v.state) {
         Some(OwnershipState::Freed) => {
-            diagnostics.push(Diagnostic {
-                file: file.to_string(),
-                line: row,
-                col,
-                message: format!("double free of '{}'", var),
-                severity: Severity::Error,
-            });
+            if !is_array_element {
+                diagnostics.push(Diagnostic {
+                    file: file.to_string(),
+                    line: row,
+                    col,
+                    message: format!("double free of '{}'", var),
+                    severity: Severity::Error,
+                });
+            }
         }
         Some(OwnershipState::Allocated) => {
             if let Some(info) = state.ownership.get_mut(var) {
@@ -1145,13 +1165,62 @@ fn handle_free(
             });
         }
         Some(OwnershipState::MaybeFreed) => {
+            if !is_array_element {
+                diagnostics.push(Diagnostic {
+                    file: file.to_string(),
+                    line: row,
+                    col,
+                    message: format!("possible double free of '{}'", var),
+                    severity: Severity::Warning,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_move(
+    from: &str,
+    to: &str,
+    row: usize,
+    col: usize,
+    file: &str,
+    state: &mut BlockState,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(info) = state.ownership.get(from).cloned() else {
+        return;
+    };
+
+    match info.state {
+        OwnershipState::Freed => {
             diagnostics.push(Diagnostic {
                 file: file.to_string(),
                 line: row,
                 col,
-                message: format!("possible double free of '{}'", var),
+                message: format!("assigning freed pointer '{}' to '{}'", from, to),
+                severity: Severity::Error,
+            });
+        }
+        OwnershipState::MaybeFreed => {
+            diagnostics.push(Diagnostic {
+                file: file.to_string(),
+                line: row,
+                col,
+                message: format!("possibly assigning freed pointer '{}' to '{}'", from, to),
                 severity: Severity::Warning,
             });
+        }
+        OwnershipState::Allocated => {
+            // Ownership moves from `from` into `to` — `from` no longer owns the
+            // allocation, so it must not be reported as leaked at scope exit.
+            state.ownership.remove(from);
+            let mut moved = info;
+            // `to` may be an array slot, struct field, or another variable whose
+            // lifetime isn't tracked here — pin it at scope depth 0 so it's never
+            // treated as "declared in this scope" when the current scope exits.
+            moved.scope_depth = 0;
+            state.ownership.insert(to.to_string(), moved);
         }
         _ => {}
     }

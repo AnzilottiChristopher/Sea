@@ -330,6 +330,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_array_alias_free_no_issues() {
+        // allocation bound to a local, then moved into an array slot via a
+        // plain identifier assignment (`args[i] = arg;`), freed later through
+        // the array — the local must not be reported as leaked.
+        let messages = run("examples/array_alias_free.c");
+        assert!(
+            messages.is_empty(),
+            "expected no issues but got: {:?}",
+            messages
+        );
+    }
+
     // Sea specific tests
     #[test]
     fn test_sea_malloc_no_drop() {

@@ -61,6 +61,12 @@ pub enum Statement {
         row: usize,
         col: usize,
     },
+    Move {
+        from: String,
+        to: String,
+        row: usize,
+        col: usize,
+    },
     EnterScope,
     ExitScope {
         row: usize,
@@ -262,9 +268,9 @@ fn collect_statements(node: Node, source: &str, cfg: &mut Cfg, current: NodeInde
             current
         }
         "declaration" => {
-            if let Some(stmt) = try_extract_declaration(node, source) {
-                cfg[current].statements.push(stmt);
-            }
+            cfg[current]
+                .statements
+                .extend(try_extract_declaration(node, source));
             let mut cursor = node.walk();
             let mut current = current;
             for child in node.children(&mut cursor) {
@@ -465,39 +471,89 @@ fn try_extract_assignment(node: Node, source: &str) -> Option<Statement> {
     let left = node.child_by_field_name("left")?;
     let right = node.child_by_field_name("right")?;
 
-    if right.kind() != "pointer_expression" {
-        return None;
-    }
+    match right.kind() {
+        "pointer_expression" => {
+            let operator = right.child(0)?;
+            let op = &source[operator.start_byte()..operator.end_byte()];
+            if op != "&" {
+                return None;
+            }
 
-    let operator = right.child(0)?;
-    let op = &source[operator.start_byte()..operator.end_byte()];
-    if op != "&" {
-        return None;
+            let (var, row, col) = get_source(left, source);
+            let target = right.named_child(0)?;
+            let (points_to, _, _) = get_source(target, source);
+            Some(Statement::PointerAssign {
+                var,
+                points_to,
+                row,
+                col,
+            })
+        }
+        // plain pointer copy: `args[i] = arg;`, `other = arg;`, `s->field = arg;` —
+        // treat it as an ownership transfer out of `arg` rather than silently
+        // dropping the assignment on the floor (which used to leave `arg` looking
+        // leaked even after its value escaped into the lhs).
+        "identifier" => {
+            let (to, row, col) = get_source(left, source);
+            let (from, _, _) = get_source(right, source);
+            if to == from {
+                return None;
+            }
+            Some(Statement::Move { from, to, row, col })
+        }
+        _ => None,
     }
-
-    let (var, row, col) = get_source(left, source);
-    let target = right.named_child(0)?;
-    let (points_to, _, _) = get_source(target, source);
-    Some(Statement::PointerAssign {
-        var,
-        points_to,
-        row,
-        col,
-    })
 }
 
-fn try_extract_declaration(node: Node, source: &str) -> Option<Statement> {
-    let decl = node.child_by_field_name("declarator")?;
+/// Builds the AddrAssign+Move pair for `T *var = identifier_value;`. Emitting
+/// the AddrAssign first establishes a safe "uninitialized stack pointer"
+/// default for `var`, which the Move then overrides *only* if `value` turns
+/// out to currently own a heap allocation (see `handle_move`) — so a copy
+/// from an untracked/non-pointer identifier still leaves `var` behaving as
+/// it did before this initializer form was recognized at all.
+fn identifier_init_statements(
+    var: String,
+    value: Node,
+    row: usize,
+    col: usize,
+    source: &str,
+) -> Vec<Statement> {
+    let mut stmts = vec![Statement::AddrAssign {
+        var: var.clone(),
+        points_to: String::new(),
+        row,
+        col,
+    }];
+    let (from, _, _) = get_source(value, source);
+    if from != var {
+        stmts.push(Statement::Move {
+            from,
+            to: var,
+            row,
+            col,
+        });
+    }
+    stmts
+}
+
+fn try_extract_declaration(node: Node, source: &str) -> Vec<Statement> {
+    let Some(decl) = node.child_by_field_name("declarator") else {
+        return vec![];
+    };
 
     match decl.kind() {
         "init_declarator" => {
-            let value = decl.child_by_field_name("value")?;
-            let inner = decl.child_by_field_name("declarator")?;
+            let (Some(value), Some(inner)) = (
+                decl.child_by_field_name("value"),
+                decl.child_by_field_name("declarator"),
+            ) else {
+                return vec![];
+            };
             let value_text = &source[value.start_byte()..value.end_byte()];
 
             // skip — try_extract_call handles malloc/calloc/realloc
             if value.kind() == "call_expression" {
-                return None;
+                return vec![];
             }
 
             match inner.kind() {
@@ -505,57 +561,67 @@ fn try_extract_declaration(node: Node, source: &str) -> Option<Statement> {
                     let var_node = inner.named_child(0).unwrap_or(inner);
                     let (var, row, col) = get_source(var_node, source);
                     if value_text == "NULL" {
-                        Some(Statement::NullAssign { var, row, col })
+                        vec![Statement::NullAssign { var, row, col }]
                     } else if value.kind() == "pointer_expression" {
-                        let target = value.named_child(0)?;
+                        let Some(target) = value.named_child(0) else {
+                            return vec![];
+                        };
                         let (points_to, _, _) = get_source(target, source);
-                        Some(Statement::AddrAssign {
+                        vec![Statement::AddrAssign {
                             var,
                             points_to,
                             row,
                             col,
-                        })
+                        }]
+                    } else if value.kind() == "identifier" {
+                        // `T *b = a;` — ownership (if any) transfers from `a` into `b`,
+                        // same as the plain-assignment case handled above.
+                        identifier_init_statements(var, value, row, col, source)
                     } else {
-                        Some(Statement::AddrAssign {
+                        vec![Statement::AddrAssign {
                             var,
                             points_to: String::new(),
                             row,
                             col,
-                        })
+                        }]
                     }
                 }
                 "identifier" => {
                     let (var, row, col) = get_source(inner, source);
-                    Some(Statement::AddrAssign {
-                        var,
-                        points_to: String::new(),
-                        row,
-                        col,
-                    })
+                    if value.kind() == "identifier" {
+                        identifier_init_statements(var, value, row, col, source)
+                    } else {
+                        vec![Statement::AddrAssign {
+                            var,
+                            points_to: String::new(),
+                            row,
+                            col,
+                        }]
+                    }
                 }
-                _ => None,
+                _ => vec![],
             }
         }
         "pointer_declarator" => {
             let var_node = decl.named_child(0).unwrap_or(decl);
             let (var, row, col) = get_source(var_node, source);
-            Some(Statement::AddrAssign {
+            vec![Statement::AddrAssign {
                 var,
                 points_to: String::new(),
                 row,
                 col,
-            })
+            }]
         }
         "identifier" => {
             let (var, row, col) = get_source(decl, source);
-            Some(Statement::AddrAssign {
+            vec![Statement::AddrAssign {
                 var,
                 points_to: String::new(),
                 row,
                 col,
-            })
+            }]
         }
-        _ => None,
+        _ => vec![],
     }
 }
 
