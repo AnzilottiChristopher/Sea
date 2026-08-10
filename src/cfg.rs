@@ -666,7 +666,13 @@ fn malloc_var(node: Node, source: &str) -> Option<(String, usize, usize)> {
     match parent.kind() {
         "init_declarator" => {
             let declarator = parent.child_by_field_name("declarator")?;
-            let inner = declarator.named_child(0).unwrap_or(declarator);
+            let mut inner = declarator;
+            while inner.kind() == "pointer_declarator" {
+                match inner.named_child(0) {
+                    Some(next) => inner = next,
+                    None => break,
+                }
+            }
             let (name, row, col) = get_source(inner, source);
             Some((name, row, col))
         }
