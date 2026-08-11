@@ -143,13 +143,15 @@ impl Sea {
                         for member in child.children(&mut cursor2) {
                             match member.kind() {
                                 "init_declaration" => {
+                                    let params = self.collect_method_params(&member);
                                     // CFG ownership analysis
                                     if let Some(body) = member.child_by_field_name("body") {
                                         let cfg = build_cfg(body, &self.source);
-                                        diagnostics.extend(self.analyze_cfg(&cfg, file, has_drop));
+                                        diagnostics.extend(
+                                            self.analyze_cfg(&cfg, file, has_drop, &params),
+                                        );
                                     }
                                     // semantic checks
-                                    let params = self.collect_method_params(&member);
                                     if let Some(body) = member.child_by_field_name("body") {
                                         self.check_method_body(
                                             &body,
@@ -163,13 +165,15 @@ impl Sea {
                                 }
                                 "method_declaration" => {
                                     let method_node = member.child(0).unwrap();
+                                    let params = self.collect_method_params(&method_node);
                                     // CFG ownership analysis
                                     if let Some(body) = method_node.child_by_field_name("body") {
                                         let cfg = build_cfg(body, &self.source);
-                                        diagnostics.extend(self.analyze_cfg(&cfg, file, has_drop));
+                                        diagnostics.extend(
+                                            self.analyze_cfg(&cfg, file, has_drop, &params),
+                                        );
                                     }
                                     // semantic checks
-                                    let params = self.collect_method_params(&method_node);
                                     if let Some(body) = method_node.child_by_field_name("body") {
                                         self.check_method_body(
                                             &body,
@@ -184,7 +188,8 @@ impl Sea {
                                 "drop_declaration" => {
                                     if let Some(body) = member.child_by_field_name("body") {
                                         let cfg = build_cfg(body, &self.source);
-                                        diagnostics.extend(self.analyze_cfg(&cfg, file, has_drop));
+                                        diagnostics
+                                            .extend(self.analyze_cfg(&cfg, file, has_drop, &[]));
                                     }
                                     if let Some(body) = member.child_by_field_name("body") {
                                         self.check_method_body(
@@ -210,8 +215,9 @@ impl Sea {
                         );
                     }
                     "main_declaration" => {
+                        let params = self.collect_method_params(&child);
                         let cfg = build_cfg(child, &self.source);
-                        diagnostics.extend(self.analyze_cfg(&cfg, file, false));
+                        diagnostics.extend(self.analyze_cfg(&cfg, file, false, &params));
 
                         // semantic checks for main body
                         if let Some(body) = child.child_by_field_name("body") {
@@ -221,19 +227,34 @@ impl Sea {
                                 file,
                                 &mut diagnostics,
                                 &file_info,
-                                vec![],
+                                params,
                             );
                         }
                     }
                     _ => {
+                        let params = self.collect_method_params(&child);
                         let cfg = build_cfg(child, &self.source);
-                        diagnostics.extend(self.analyze_cfg(&cfg, file, false));
+                        diagnostics.extend(self.analyze_cfg(&cfg, file, false, &params));
                     }
                 }
             }
         } else {
-            let cfg = build_cfg(root, &self.source);
-            diagnostics.extend(self.analyze_cfg(&cfg, file, false));
+            // Build one CFG per top-level function, mirroring the Sea-mode
+            // per-method loop above, so each function's own parameters can
+            // be seeded and no ownership state leaks across functions.
+            let mut cursor = root.walk();
+            for child in root.children(&mut cursor) {
+                if child.kind() == "function_definition" {
+                    let params = self.collect_c_function_params(&child);
+                    if let Some(body) = child.child_by_field_name("body") {
+                        let cfg = build_cfg(body, &self.source);
+                        diagnostics.extend(self.analyze_cfg(&cfg, file, false, &params));
+                    }
+                } else {
+                    let cfg = build_cfg(child, &self.source);
+                    diagnostics.extend(self.analyze_cfg(&cfg, file, false, &[]));
+                }
+            }
         }
 
         diagnostics
@@ -449,6 +470,66 @@ impl Sea {
             }
         }
         params
+    }
+
+    /// Same purpose as `collect_method_params` but for plain C
+    /// `function_definition` nodes (tree-sitter-c grammar), where a
+    /// parameter's pointer-ness lives in nested `pointer_declarator`s
+    /// around the name rather than in the `type` field text.
+    fn collect_c_function_params(&self, func_def: &tree_sitter::Node) -> Vec<(String, String)> {
+        let mut params = Vec::new();
+
+        let Some(declarator) = func_def.child_by_field_name("declarator") else {
+            return params;
+        };
+        let Some(func_declarator) = Self::find_function_declarator(declarator) else {
+            return params;
+        };
+        let Some(params_node) = func_declarator.child_by_field_name("parameters") else {
+            return params;
+        };
+
+        let mut cursor = params_node.walk();
+        for param in params_node.children(&mut cursor) {
+            if param.kind() != "parameter_declaration" {
+                continue;
+            }
+            let Some(type_node) = param.child_by_field_name("type") else {
+                continue;
+            };
+            let Some(mut decl) = param.child_by_field_name("declarator") else {
+                continue;
+            };
+            // Walk through any number of pointer levels to reach the name —
+            // `char *s`, `char **str`, etc. all bottom out at an identifier.
+            while decl.kind() == "pointer_declarator" {
+                match decl.child_by_field_name("declarator") {
+                    Some(inner) => decl = inner,
+                    None => break,
+                }
+            }
+            if decl.kind() == "identifier" {
+                let type_text =
+                    self.source[type_node.start_byte()..type_node.end_byte()].to_string();
+                let name_text = self.source[decl.start_byte()..decl.end_byte()].to_string();
+                params.push((type_text, name_text));
+            }
+        }
+        params
+    }
+
+    /// A function's `declarator` field can be wrapped in `pointer_declarator`
+    /// (return type is a pointer, e.g. `char *foo(...)`) before reaching the
+    /// actual `function_declarator` that holds the parameter list.
+    fn find_function_declarator(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+        match node.kind() {
+            "function_declarator" => Some(node),
+            "pointer_declarator" | "array_declarator" => {
+                node.child_by_field_name("declarator")
+                    .and_then(Self::find_function_declarator)
+            }
+            _ => None,
+        }
     }
 
     // ─── Semantic body checker ────────────────────────────────────────────────
@@ -962,7 +1043,13 @@ impl Sea {
 
     // ─── CFG ownership analysis (unchanged) ───────────────────────────────────
 
-    pub fn analyze_cfg(&self, cfg: &Cfg, file: &str, class_has_drop: bool) -> Vec<Diagnostic> {
+    pub fn analyze_cfg(
+        &self,
+        cfg: &Cfg,
+        file: &str,
+        class_has_drop: bool,
+        params: &[(String, String)],
+    ) -> Vec<Diagnostic> {
         let mut diagnostics: Vec<Diagnostic> = Vec::new();
         let mut block_in_states: HashMap<NodeIndex, BlockState> = HashMap::new();
         let mut block_out_states: HashMap<NodeIndex, BlockState> = HashMap::new();
@@ -973,7 +1060,17 @@ impl Sea {
             let mut predecessors = cfg.neighbors_directed(index, petgraph::Direction::Incoming);
 
             let incoming_state = match predecessors.next() {
-                None => BlockState::new(class_has_drop),
+                // Function entry (the only node with no predecessors): seed
+                // every parameter as already-initialized, since the caller
+                // guarantees it before the body ever runs — regardless of
+                // pointer depth or how the body later dereferences it.
+                None => {
+                    let mut state = BlockState::new(class_has_drop);
+                    for (_, name) in params {
+                        state.ownership.insert(name.clone(), VariableInfo::param());
+                    }
+                    state
+                }
                 Some(first_pred) => {
                     let mut state = block_out_states
                         .get(&first_pred)

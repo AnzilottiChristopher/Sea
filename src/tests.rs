@@ -444,4 +444,34 @@ mod tests {
             messages
         );
     }
+
+    #[test]
+    fn test_param_deref_no_issues() {
+        let messages = run("examples/param_deref.c");
+        assert!(
+            messages.is_empty(),
+            "function parameters are initialized by the caller and shouldn't be \
+             flagged as uninitialized, regardless of pointer depth or whether they're \
+             dereferenced via `*p` or `p[i]`, but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
+    fn test_multi_function_use_before_init() {
+        let messages = run("examples/multi_function_use_before_init.c");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("use of uninitialized pointer 'p'")),
+            "expected a genuine uninitialized-local diagnostic for 'p' but got: {:?}",
+            messages
+        );
+        assert!(
+            !messages.iter().any(|m| m.contains("'s'")),
+            "parameter 's' in an earlier function must not leak a diagnostic into \
+             or out of the next function's analysis, but got: {:?}",
+            messages
+        );
+    }
 }
