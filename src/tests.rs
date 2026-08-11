@@ -458,6 +458,18 @@ mod tests {
     }
 
     #[test]
+    fn test_cast_init_no_issues() {
+        let messages = run("examples/cast_init_no_issues.c");
+        assert!(
+            !messages.iter().any(|m| m.contains("'targ'")),
+            "a pointer declared and initialized in one statement via a cast \
+             (`T *targ = (T *)args;`) must not be treated as uninitialized, \
+             but got: {:?}",
+            messages
+        );
+    }
+
+    #[test]
     fn test_multi_function_use_before_init() {
         let messages = run("examples/multi_function_use_before_init.c");
         assert!(

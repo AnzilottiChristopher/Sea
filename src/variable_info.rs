@@ -39,6 +39,22 @@ impl VariableInfo {
         }
     }
 
+    /// A pointer declared with an initializer we don't specifically model
+    /// (e.g. `T *p = (T *)raw;`) — the malloc family and `NULL`/`&x`/plain-
+    /// identifier initializers are handled elsewhere and don't reach this
+    /// constructor. The declaration leaves `p` initialized and non-null, but
+    /// we don't know what it points to, so it's represented the same way as
+    /// `param()` (a known-good stack pointer) except scoped normally, since
+    /// this is a local, not a parameter that must outlive the whole function.
+    pub fn opaque_init(scope_depth: usize) -> Self {
+        VariableInfo {
+            state: OwnershipState::Allocated,
+            scope_depth,
+            alloc_kind: AllocKind::Stack,
+            points_to: None,
+        }
+    }
+
     /// A function parameter: initialized by the caller before the function
     /// body runs, so it must never read as `Uninitialized`. `Allocated` +
     /// `Stack` reuses the existing "known-good pointer" representation

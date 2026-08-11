@@ -55,6 +55,20 @@ pub enum Statement {
         row: usize,
         col: usize,
     },
+    /// `T *var = <expr>;` where `<expr>` isn't one of the specifically
+    /// modeled initializer shapes (`NULL`, `&x`, plain identifier, malloc
+    /// family) — e.g. a cast, arithmetic expression, or literal. The
+    /// declaration DOES initialize `var`, we just don't track what it
+    /// points to. Kept distinct from `AddrAssign` with an empty
+    /// `points_to`, which represents a genuinely bare, uninitialized
+    /// declarator (`T *var;`) — collapsing the two onto the same statement
+    /// is what made e.g. `thread_arg *targ = (thread_arg *)args;` read as
+    /// uninitialized.
+    OpaqueInit {
+        var: String,
+        row: usize,
+        col: usize,
+    },
     PointerAssign {
         var: String,
         points_to: String,
@@ -578,12 +592,10 @@ fn try_extract_declaration(node: Node, source: &str) -> Vec<Statement> {
                         // same as the plain-assignment case handled above.
                         identifier_init_statements(var, value, row, col, source)
                     } else {
-                        vec![Statement::AddrAssign {
-                            var,
-                            points_to: String::new(),
-                            row,
-                            col,
-                        }]
+                        // Some other initializer expression (cast, arithmetic,
+                        // literal, ...) — `var` is still initialized by it, even
+                        // though we don't track what it points to.
+                        vec![Statement::OpaqueInit { var, row, col }]
                     }
                 }
                 "identifier" => {
@@ -591,12 +603,7 @@ fn try_extract_declaration(node: Node, source: &str) -> Vec<Statement> {
                     if value.kind() == "identifier" {
                         identifier_init_statements(var, value, row, col, source)
                     } else {
-                        vec![Statement::AddrAssign {
-                            var,
-                            points_to: String::new(),
-                            row,
-                            col,
-                        }]
+                        vec![Statement::OpaqueInit { var, row, col }]
                     }
                 }
                 _ => vec![],

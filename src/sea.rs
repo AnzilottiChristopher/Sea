@@ -1168,6 +1168,11 @@ impl Sea {
                         }
                         state.ownership.insert(var.clone(), info);
                     }
+                    Statement::OpaqueInit { var, .. } => {
+                        state
+                            .ownership
+                            .insert(var.clone(), VariableInfo::opaque_init(state.scope_depth));
+                    }
                     Statement::EnterScope => state.enter_scope(),
                     Statement::ExitScope { row, col } => {
                         let incoming = block_in_states
